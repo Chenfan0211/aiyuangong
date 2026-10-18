@@ -24,11 +24,12 @@
       <button class="ghost" id="logoutBtn">退出登录</button>
     </div>
     <div class="scope"><b id="scopeTitle">店长权限</b><span id="scopeText">可查看全店任务与经营诊断；高风险动作仍需审批。</span></div>
-    <div class="links"><a href="/dashboard">经营看板 →</a><a href="/governance">审批与审计中心 →</a><a href="/index.html">查看完整落地方案 →</a><div class="demo">本页面是本地 MVP。身份下拉框用于演示，不是真实登录；接入门店前必须换成企业身份认证。</div></div>
+    <div class="links"><a href="/dashboard">经营看板 →</a><a href="/governance">审批与审计中心 →</a><a href="/settings">设置与成员 →</a><a href="/index.html">查看完整落地方案 →</a><div class="demo">本页面是本地 MVP。身份下拉框用于演示，不是真实登录；接入门店前必须换成企业身份认证。</div></div>
   </aside>
   <main>
     <header class="top"><div class="identity"><b id="identityName">武汉狮子座店店长</b><span id="taskCount">正在读取今日任务…</span></div><span class="badge">PILOT MVP</span></header>
     <div class="data-strip" aria-label="平台数据状态"><span class="platform" id="meituanStatus">美团：检查中</span><span class="platform" id="douyinStatus">抖音：检查中</span><span class="platform" id="qualityStatus">数据质量：检查中</span></div>
+    <section class="ops" id="reviewPanel" aria-label="待验收任务" hidden><div class="ops-head"><h2 id="reviewTitle">待我验收</h2><span class="muted" id="reviewCount"></span></div><div class="cards" id="reviewCards"></div></section>
     <section class="ops" aria-label="今日任务">
       <div class="ops-head"><b id="opsTitle">今日三件事</b><button class="ghost" id="reportBtn">生成今日日报</button></div>
       <div class="cards" id="taskCards"><div class="empty">正在读取今日任务…</div></div>

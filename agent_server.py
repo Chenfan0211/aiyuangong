@@ -408,6 +408,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._static(ROOT / "dashboard.html")
         elif parsed.path in ("/governance", "/governance.html"):
             self._static(ROOT / "governance.html")
+        elif parsed.path in ("/settings", "/settings.html"):
+            self._static(ROOT / "settings.html")
         elif parsed.path == "/index.html":
             self._static(ROOT / "index.html")
         else:

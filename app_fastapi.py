@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import secrets
 import time
 import uuid
 from datetime import datetime
@@ -30,13 +31,14 @@ from pydantic import BaseModel, Field
 
 from agent_tools import PermissionDenied, StoreTools
 from evidence_store import EvidenceError, EvidenceNotFoundError, EvidenceStore
-from auth import AuthError, AuthStore, AccountLocked, CredentialsError, SessionInvalid, SecurityContext
+from outcome_tracker import OutcomeTracker, OutcomeTrackerError
+from auth import AuthError, AuthStore, AccountLocked, CredentialsError, ROLES, SessionInvalid, SecurityContext
 from governance import ApprovalStore, AuditCenter, ToolRunLog, apply_decision, log_tool_call
 from platform_data import PlatformMetricStore
 from llm_agent import OpenAIToolResponder, ToolCallingAgent
 from reporting import StoreReporter
 from registry import RegistryStore
-from snapshot_builder import load_config
+from snapshot_builder import SnapshotError, load_config, save_config
 from store_agent import AgentSessionStore, OpenAICompatibleResponder, StoreOperationsAgent
 from task_store import TaskStore, TaskStoreError
 
@@ -45,6 +47,17 @@ ACCESS_LOGGER = logging.getLogger("store_ops.access")
 WRITE_STATUSES = ("accepted", "done", "verified", "rejected", "canceled", "ready")
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+
+
+def _deep_update(target: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_update(target[key], value)
+        else:
+            target[key] = value
+    return target
 
 
 def validate_startup(host: str, auth_mode: str) -> None:
@@ -76,6 +89,21 @@ class EvidenceRequest(BaseModel):
     evidence_type: str = Field(..., description="证据类型，例如：脱敏订单号 / 平台回复截图")
     object_ref: str = Field(..., description="证据引用（脱敏单号、文件路径或对象存储 key）")
     note: Optional[str] = None
+
+
+class FeedbackRequest(BaseModel):
+    decision: str = Field(..., description="accepted / rejected / false_positive")
+    reason: str = Field("", max_length=1000)
+
+
+class ConfigPatchRequest(BaseModel):
+    config: dict[str, Any] = Field(..., description="需要合并到当前门店配置的字段")
+
+
+class MemberCreateRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    display_name: str = Field(..., min_length=1, max_length=40)
+    role: str = Field(..., description="owner / area_manager / manager / operator / employee")
 
 
 class MfaCodeRequest(BaseModel):
@@ -118,6 +146,7 @@ class AppContext:
         self.metric_store = PlatformMetricStore(metrics_db, tenant_id=tenant_id)
         self.task_store = TaskStore(store_db, tenant_id=tenant_id)
         self.evidence = EvidenceStore(store_db, root_dir=evidence_dir, tenant_id=tenant_id)
+        self.outcomes = OutcomeTracker(store_db, tenant_id=tenant_id)
         self.auth = AuthStore(store_db, tenant_id=tenant_id)
         self.tools = StoreTools(self.config, self.metric_store, self.task_store, config_path=self.config_path)
         self.sessions = AgentSessionStore(chat_db, tenant_id=tenant_id)
@@ -215,11 +244,11 @@ def create_app(
     def current_context(
         request: Request,
         authorization: str = Header(default=""),
-        user_id: Optional[str] = Query(default=None, description="仅 demo 模式使用"),
+        demo_user_id: Optional[str] = Query(default=None, alias="user_id", description="仅 demo 模式使用"),
     ) -> SecurityContext:
         if ctx.auth_mode == "demo":
             try:
-                return _demo_context(user_id or "manager-001")
+                return _demo_context(demo_user_id or "manager-001")
             except ValueError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
@@ -340,6 +369,70 @@ def create_app(
             "session_id": context.session_id, "expires_at": context.expires_at,
             "permissions": sorted(context.permissions),
         }
+
+    # ---------------- 管理后台 ----------------
+
+    @app.get("/api/admin/config", tags=["管理"], summary="读取门店配置")
+    def admin_config_get(context: SecurityContext = Depends(require("config:write"))) -> dict[str, Any]:
+        return {"config": ctx.config, "store_id": ctx.store_id, "tenant_id": ctx.config.get("tenant_id")}
+
+    @app.patch("/api/admin/config", tags=["管理"], summary="修改门店配置并写审计")
+    def admin_config_patch(payload: ConfigPatchRequest,
+                           context: SecurityContext = Depends(require("config:write"))) -> dict[str, Any]:
+        before = json.loads(json.dumps(ctx.config, ensure_ascii=False))
+        merged = _deep_update(json.loads(json.dumps(ctx.config, ensure_ascii=False)), payload.config)
+        try:
+            save_config(ctx.config_path, merged)
+        except SnapshotError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _deep_update(ctx.config, payload.config)
+        ctx.auth.record_audit(event_type="store_config_updated", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="store_config", object_id=ctx.store_id,
+                              before=before, after=merged)
+        return {"config": ctx.config, "updated": True}
+
+    @app.get("/api/admin/members", tags=["管理"], summary="列出门店成员")
+    def admin_members(context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        return {"members": ctx.auth.list_users(context.tenant_id, context.store_id)}
+
+    @app.post("/api/admin/members", tags=["管理"], summary="创建门店成员并返回一次性临时口令")
+    def admin_member_create(payload: MemberCreateRequest,
+                            context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        if payload.role not in ROLES:
+            raise HTTPException(status_code=400, detail="未知角色")
+        temporary = secrets.token_urlsafe(12)
+        try:
+            member = ctx.auth.create_user(payload.username, temporary, payload.display_name, payload.role,
+                                          context.tenant_id, context.store_id)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="member_created", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="user", object_id=member["user_id"], after={"role": payload.role})
+        return {"member": member, "temporary_password": temporary}
+
+    @app.post("/api/admin/members/{user_id}/reset-password", tags=["管理"], summary="重置成员口令")
+    def admin_member_reset_password(user_id: str,
+                                    context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        temporary = secrets.token_urlsafe(12)
+        try:
+            ctx.auth.set_password(user_id, temporary, actor_id=context.user_id)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="member_password_reset", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="user", object_id=user_id)
+        return {"temporary_password": temporary, "sessions_revoked": True}
+
+    @app.post("/api/admin/members/{user_id}/reset-mfa", tags=["管理"], summary="重置成员 MFA")
+    def admin_member_reset_mfa(user_id: str,
+                               context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        ctx.auth.reset_mfa(user_id)
+        ctx.auth.record_audit(event_type="member_mfa_reset", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="user", object_id=user_id)
+        return {"mfa_enabled": ctx.auth.is_mfa_enabled(user_id)}
 
     # ---------------- 门店与数据 ----------------
 
@@ -490,6 +583,39 @@ def create_app(
                      if item["evidence_id"] == evidence_id), {})
         return Response(content=data, media_type=meta.get("mime_type", "application/octet-stream"),
                         headers={"Content-Disposition": f'inline; filename="{evidence_id}"'})
+
+    @app.post("/api/tasks/{task_id}/feedback", tags=["任务"], summary="记录任务采纳/驳回/误报反馈")
+    def task_feedback(task_id: str, payload: FeedbackRequest,
+                      context: SecurityContext = Depends(require("tasks:read:own"))) -> dict[str, Any]:
+        try:
+            task = ctx.task_store.get_task(task_id)
+        except TaskStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _require_visible(context, task)
+        try:
+            feedback = ctx.outcomes.record_feedback(context.store_id, task_id, context.user_id,
+                                                    payload.decision, payload.reason)
+        except OutcomeTrackerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="task_feedback_recorded", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="action_task", object_id=task_id,
+                              after={"decision": payload.decision, "reason": payload.reason})
+        return {"feedback": feedback}
+
+    @app.get("/api/tasks/{task_id}/outcomes", tags=["任务"], summary="任务 D+7/D+28 结果归因")
+    def task_outcomes(task_id: str,
+                      context: SecurityContext = Depends(require("tasks:read:own"))) -> dict[str, Any]:
+        try:
+            task = ctx.task_store.get_task(task_id)
+        except TaskStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _require_visible(context, task)
+        return {"outcomes": ctx.outcomes.list_outcomes(context.store_id, task_id=task_id)}
+
+    @app.get("/api/outcomes/summary", tags=["看板"], summary="试点采纳率、误报率和结果缺失汇总")
+    def outcomes_summary(context: SecurityContext = Depends(require("report:read"))) -> dict[str, Any]:
+        return {"summary": ctx.outcomes.outcome_summary(context.store_id)}
 
     @app.post("/api/tasks/{task_id}/status", tags=["任务"], summary="推进任务状态")
     def change_status(task_id: str, payload: StatusRequest,
@@ -649,6 +775,11 @@ def create_app(
     @app.get("/dashboard.html", include_in_schema=False)
     def dashboard_page() -> HTMLResponse:
         return HTMLResponse((ROOT / "dashboard.html").read_text(encoding="utf-8"))
+
+    @app.get("/settings", include_in_schema=False)
+    @app.get("/settings.html", include_in_schema=False)
+    def settings_page() -> HTMLResponse:
+        return HTMLResponse((ROOT / "settings.html").read_text(encoding="utf-8"))
 
     @app.get("/governance", include_in_schema=False)
     @app.get("/governance.html", include_in_schema=False)

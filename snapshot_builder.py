@@ -44,6 +44,24 @@ def load_config(path: Path) -> dict[str, Any]:
         raise SnapshotError(f"门店配置不是合法 JSON：{path}（{exc}）") from exc
 
 
+def save_config(path: Path, config: dict[str, Any]) -> None:
+    """Validate and atomically replace the JSON configuration file."""
+    if not isinstance(config, dict):
+        raise SnapshotError("配置必须是 JSON 对象")
+    for key in ("tenant_id", "store_id", "name", "review_cycle", "rules"):
+        if key not in config:
+            raise SnapshotError(f"配置缺少 {key}")
+    cycle = config.get("review_cycle")
+    if not isinstance(cycle, dict) or not cycle.get("cycle_start") or not cycle.get("cycle_end"):
+        raise SnapshotError("review_cycle 必须包含 cycle_start 和 cycle_end")
+    if date.fromisoformat(str(cycle["cycle_end"])) < date.fromisoformat(str(cycle["cycle_start"])):
+        raise SnapshotError("评价周期结束日不能早于开始日")
+    path = Path(path)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
 def parse_target_date(value: date | str | None) -> date:
     if value is None or value == "today":
         return date.today()

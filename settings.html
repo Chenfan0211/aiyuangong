@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>设置与成员 · 门店运营系统</title>
+  <link rel="stylesheet" href="/static/settings.css" />
+</head>
+<body>
+<div class="wrap">
+  <header><div><small>STORE ADMIN</small><h1>设置与成员</h1></div><a class="btn" href="/agent.html">返回对话</a></header>
+  <main>
+    <div id="notice" class="notice" hidden></div>
+    <section>
+      <h2>门店配置</h2>
+      <form id="configForm" class="form">
+        <label>评价周期开始<input id="cycleStart" type="date" required /></label>
+        <label>评价周期结束<input id="cycleEnd" type="date" required /></label>
+        <label>月度有效评价目标<input id="targetQualified" type="number" min="0" required /></label>
+        <label>数据新鲜度阈值（天）<input id="freshDays" type="number" min="1" max="30" required /></label>
+        <label>差评 SLA（小时）<input id="slaHours" type="number" min="1" max="72" required /></label>
+        <button type="submit">保存配置</button>
+      </form>
+    </section>
+    <section>
+      <div class="section-head"><h2>成员</h2><button id="refreshMembers" class="ghost" type="button">刷新</button></div>
+      <form id="memberForm" class="form">
+        <label>用户名<input id="memberUsername" required minlength="3" /></label>
+        <label>显示名称<input id="memberName" required /></label>
+        <label>角色<select id="memberRole"><option value="employee">店员</option><option value="operator">线上运营</option><option value="manager">店长</option><option value="area_manager">区域负责人</option><option value="owner">店主</option></select></label>
+        <button type="submit">创建成员</button>
+      </form>
+      <div class="scroll"><table><thead><tr><th>用户名</th><th>姓名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id="memberBody"></tbody></table></div>
+    </section>
+  </main>
+</div>
+<script src="/static/settings.js"></script>
+</body>
+</html>
