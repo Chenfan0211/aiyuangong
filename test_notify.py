@@ -278,6 +278,18 @@ class SendTests(Base):
 
 
 class CliTests(Base):
+    def test_cli_json_output_is_ascii_safe_on_windows_console(self):
+        self.seed()
+        env = dict(os.environ, TZ="Asia/Shanghai")
+        env.pop("FEISHU_WEBHOOK_URL", None)
+        env.pop("WECOM_WEBHOOK_URL", None)
+        result = subprocess.run(
+            [sys.executable, "store_cli.py", "--metrics-db", str(self.metrics_db), "--store-db", str(self.ops_db),
+             "notify", "--kind", "daily"],
+            cwd=str(ROOT), capture_output=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace")[-600:])
+        result.stdout.decode("ascii")
+
     def test_cli_notify_writes_outbox_and_records(self):
         self.seed()
         env = dict(os.environ, TZ="Asia/Shanghai")
@@ -286,7 +298,7 @@ class CliTests(Base):
         result = subprocess.run(
             [sys.executable, "store_cli.py", "--metrics-db", str(self.metrics_db), "--store-db", str(self.ops_db),
              "notify", "--kind", "daily"],
-            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", env=env)
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
         self.assertEqual(result.returncode, 0, result.stderr[-600:])
         payload = json.loads(result.stdout)
         self.assertTrue(payload["drafted"])
@@ -296,7 +308,7 @@ class CliTests(Base):
 
         history = subprocess.run(
             [sys.executable, "store_cli.py", "--store-db", str(self.ops_db), "notify-history"],
-            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
         self.assertEqual(history.returncode, 0, history.stderr[-400:])
         self.assertEqual(len(json.loads(history.stdout)["history"]), 1)
 
