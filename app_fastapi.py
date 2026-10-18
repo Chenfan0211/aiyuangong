@@ -19,16 +19,17 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_tools import PermissionDenied, StoreTools
-from auth import AuthError, AuthStore, AccountLocked, SessionInvalid, SecurityContext
+from auth import AuthError, AuthStore, AccountLocked, CredentialsError, SessionInvalid, SecurityContext
 from governance import ApprovalStore, AuditCenter, ToolRunLog, apply_decision, log_tool_call
 from platform_data import PlatformMetricStore
 from llm_agent import OpenAIToolResponder, ToolCallingAgent
@@ -74,6 +75,15 @@ class EvidenceRequest(BaseModel):
     evidence_type: str = Field(..., description="证据类型，例如：脱敏订单号 / 平台回复截图")
     object_ref: str = Field(..., description="证据引用（脱敏单号、文件路径或对象存储 key）")
     note: Optional[str] = None
+
+
+class MfaCodeRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=32)
+
+
+class MfaVerifyRequest(BaseModel):
+    mfa_token: str = Field(..., min_length=20)
+    code: str = Field(..., min_length=6, max_length=32)
 
 
 class ApprovalCreate(BaseModel):
@@ -211,6 +221,8 @@ def create_app(
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
         if not token:
+            token = request.cookies.get("store_ops_session", "")
+        if not token:
             raise HTTPException(status_code=401, detail="缺少认证令牌，请先登录")
         try:
             return ctx.auth.resolve(token)
@@ -224,6 +236,11 @@ def create_app(
 
     def require(permission: Optional[str] = None):
         def dependency(request: Request, context: SecurityContext = Depends(current_context)) -> SecurityContext:
+            allowed_mfa = request.url.path.startswith("/api/auth/mfa/") or request.url.path in {
+                "/api/auth/me", "/api/auth/logout",
+            }
+            if context.mfa_enrollment_required and not allowed_mfa:
+                raise HTTPException(status_code=403, detail="必须先完成 MFA 绑定")
             if permission and not context.has(permission):
                 ctx.auth.record_audit(
                     event_type="permission_denied", actor_type="user", actor_id=context.user_id,
@@ -242,31 +259,72 @@ def create_app(
 
     # ---------------- 认证 ----------------
 
+    def _session_payload(result: dict[str, Any]) -> dict[str, Any]:
+        context = result["context"]
+        return {
+            "token": result["token"], "expires_at": result["expires_at"], "mfa_required": False,
+            "user": context.to_user_dict(), "tenant_id": context.tenant_id, "store_id": context.store_id,
+            "permissions": sorted(context.permissions),
+            "mfa_enrollment_required": context.mfa_enrollment_required,
+        }
+
+    def _set_session_cookie(response: Response, token: str, expires_at: str) -> None:
+        max_age = max(60, int((datetime.fromisoformat(expires_at) - datetime.now()).total_seconds()))
+        response.set_cookie("store_ops_session", token, max_age=max_age, httponly=True,
+                            secure=_is_production(), samesite="strict", path="/")
+
     @app.post("/api/auth/login", tags=["认证"], summary="用户名口令登录")
-    def login(payload: LoginRequest) -> dict[str, Any]:
+    def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
         try:
             result = ctx.auth.login(payload.username, payload.password, payload.store_id)
         except AccountLocked as exc:
             raise HTTPException(status_code=423, detail=str(exc)) from exc
         except AuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if result.get("mfa_required"):
+            return result
         context = result["context"]
         if context.store_id != ctx.store_id:
             raise HTTPException(status_code=401,
                                 detail=f"该账号登录的门店是 {context.store_id}，本服务只服务 {ctx.store_id}")
-        return {
-            "token": result["token"], "expires_at": result["expires_at"],
-            "user": context.to_user_dict(), "tenant_id": context.tenant_id, "store_id": context.store_id,
-            "permissions": sorted(context.permissions),
-        }
+        _set_session_cookie(response, result["token"], result["expires_at"])
+        return _session_payload(result)
+
+    @app.post("/api/auth/mfa/verify", tags=["认证"], summary="完成 MFA 两步登录")
+    def mfa_verify(payload: MfaVerifyRequest, response: Response) -> dict[str, Any]:
+        try:
+            result = ctx.auth.complete_mfa(payload.mfa_token, payload.code)
+        except (CredentialsError, SessionInvalid, AuthError) as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        _set_session_cookie(response, result["token"], result["expires_at"])
+        return _session_payload(result)
+
+    @app.post("/api/auth/mfa/setup", tags=["认证"], summary="开始绑定 TOTP")
+    def mfa_setup(context: SecurityContext = Depends(require())) -> dict[str, str]:
+        return ctx.auth.begin_mfa_enrollment(context.user_id)
+
+    @app.post("/api/auth/mfa/enable", tags=["认证"], summary="确认并启用 TOTP")
+    def mfa_enable(payload: MfaCodeRequest,
+                   context: SecurityContext = Depends(require())) -> dict[str, Any]:
+        try:
+            codes = ctx.auth.confirm_mfa_enrollment(context.user_id, payload.code)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="mfa_enabled", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="user", object_id=context.user_id)
+        return {"enabled": True, "recovery_codes": codes}
 
     @app.post("/api/auth/logout", tags=["认证"], summary="撤销当前令牌")
-    def logout(request: Request, authorization: str = Header(default=""),
+    def logout(request: Request, response: Response, authorization: str = Header(default=""),
                context: SecurityContext = Depends(require())) -> dict[str, Any]:
         token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        if not token:
+            token = request.cookies.get("store_ops_session", "")
         if ctx.auth_mode == "demo":
             return {"revoked": False, "auth_mode": "demo"}
         revoked = ctx.auth.logout(token)
+        response.delete_cookie("store_ops_session", path="/")
         ctx.auth.record_audit(event_type="logout", actor_type="user", actor_id=context.user_id,
                               tenant_id=context.tenant_id, store_id=context.store_id,
                               object_type="session", object_id=context.session_id)

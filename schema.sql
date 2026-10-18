@@ -265,6 +265,29 @@ create table if not exists auth_sessions (
 );
 create index if not exists idx_auth_sessions_user on auth_sessions (user_id, expires_at);
 
+create table if not exists user_mfa (
+  user_id text primary key,
+  tenant_id text not null default '',
+  secret_enc text not null,
+  recovery_hashes_json jsonb not null default '[]'::jsonb,
+  enabled_at timestamptz,
+  last_verified_at timestamptz,
+  created_at timestamptz not null,
+  updated_at timestamptz not null
+);
+
+create table if not exists mfa_challenges (
+  challenge_hash text primary key,
+  user_id text not null,
+  tenant_id text not null default '',
+  store_id text not null,
+  role text not null,
+  created_at timestamptz not null,
+  expires_at timestamptz not null,
+  consumed_at timestamptz
+);
+create index if not exists idx_mfa_challenges_user on mfa_challenges (user_id, expires_at);
+
 create table if not exists login_attempts (
   scope_key text primary key,           -- 全局表：按用户名节流，不含租户信息
   fail_count integer not null default 0,
@@ -360,6 +383,10 @@ create policy p_users_tenant on users using (tenant_id = current_setting('app.te
 alter table memberships enable row level security;
 drop policy if exists p_memberships_tenant on memberships;
 create policy p_memberships_tenant on memberships using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
+alter table user_mfa enable row level security;
+drop policy if exists p_user_mfa_tenant on user_mfa;
+create policy p_user_mfa_tenant on user_mfa using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
+
 alter table auth_sessions enable row level security;
 drop policy if exists p_auth_sessions_tenant on auth_sessions;
 create policy p_auth_sessions_tenant on auth_sessions using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));

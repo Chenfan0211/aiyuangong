@@ -15,15 +15,21 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
+import struct
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+
+from cryptography.fernet import Fernet, InvalidToken
 
 from db import Database
 
@@ -87,9 +93,49 @@ MIN_PASSWORD_LENGTH = 10
 MAX_LOGIN_FAILURES = 5
 LOCK_MINUTES = 15
 SESSION_TTL_HOURS = 12
+MFA_ROLES = frozenset({"owner", "area_manager", "manager"})
+MFA_CHALLENGE_MINUTES = 5
 PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d)\d{4}(\d{4})(?!\d)")
 ID_CARD_RE = re.compile(r"(?<!\d)(\d{6})\d{8}(\d{3}[0-9Xx])(?!\d)")
 SECRET_KEYS = ("password", "passwd", "secret", "token", "api_key", "apikey", "authorization", "credential")
+
+
+
+
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _totp_key(secret: str) -> bytes:
+    padded = (secret or "").strip().upper() + "=" * ((8 - len(secret.strip()) % 8) % 8)
+    return base64.b32decode(padded)
+
+
+def totp_code(secret: str, timestamp: Optional[float] = None, digits: int = 6, period: int = 30) -> str:
+    counter = int(timestamp if timestamp is not None else time.time()) // period
+    digest = hmac.new(_totp_key(secret), struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(value % (10 ** digits)).zfill(digits)
+
+
+def verify_totp(secret: str, code: str, timestamp: Optional[float] = None, window: int = 1) -> bool:
+    candidate = re.sub(r"\D", "", str(code or ""))
+    if len(candidate) != 6:
+        return False
+    moment = timestamp if timestamp is not None else time.time()
+    return any(hmac.compare_digest(totp_code(secret, moment + offset * 30), candidate)
+               for offset in range(-window, window + 1))
+
+
+def _mfa_fernet() -> Fernet:
+    raw = os.getenv("STORE_AGENT_MFA_KEY") or "development-only-mfa-key"
+    key = base64.urlsafe_b64encode(hashlib.sha256(raw.encode("utf-8")).digest())
+    return Fernet(key)
+
+
+def _recovery_hash(code: str) -> str:
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
 
 
 class AuthError(ValueError):
@@ -198,6 +244,7 @@ class SecurityContext:
     session_id: str = ""
     expires_at: str = ""
     permissions: frozenset[str] = field(default_factory=frozenset)
+    mfa_enrollment_required: bool = False
 
     @property
     def role_label(self) -> str:
@@ -234,7 +281,7 @@ class AuthStore:
 
     def _migrate(self) -> None:
         with self._connection() as conn:
-            for table in ("users", "memberships", "auth_sessions", "audit_events"):
+            for table in ("users", "memberships", "auth_sessions", "audit_events", "user_mfa", "mfa_challenges"):
                 self.db.ensure_tenant_column(conn, table)
 
     def _connection(self):
@@ -318,6 +365,29 @@ class AuthStore:
                 );
                 create index if not exists idx_audit_scope on audit_events(tenant_id, store_id, created_at);
                 create index if not exists idx_audit_event on audit_events(event_type, created_at);
+
+                create table if not exists user_mfa (
+                  user_id text primary key,
+                  tenant_id text not null,
+                  secret_enc text not null,
+                  recovery_hashes_json text not null default '[]',
+                  enabled_at text,
+                  last_verified_at text,
+                  created_at text not null,
+                  updated_at text not null
+                );
+
+                create table if not exists mfa_challenges (
+                  challenge_hash text primary key,
+                  user_id text not null,
+                  tenant_id text not null,
+                  store_id text not null,
+                  role text not null,
+                  created_at text not null,
+                  expires_at text not null,
+                  consumed_at text
+                );
+                create index if not exists idx_mfa_challenges_user on mfa_challenges(user_id, expires_at);
                 """
             )
 
@@ -460,6 +530,148 @@ class AuthStore:
             return {"username": username, "fail_count": 0, "locked_until": None}
         return {"username": username, "fail_count": int(row["fail_count"]), "locked_until": row["locked_until"]}
 
+    # ---------------- MFA ----------------
+
+    def mfa_enforced(self) -> bool:
+        return os.getenv("STORE_AGENT_MFA_ENFORCE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def mfa_required_for(self, role: str) -> bool:
+        return self.mfa_enforced() and role in MFA_ROLES
+
+    def is_mfa_enabled(self, user_id: str) -> bool:
+        with self._connection() as conn:
+            row = conn.execute("select enabled_at from user_mfa where user_id=?", (user_id,)).fetchone()
+        return bool(row and row["enabled_at"])
+
+    def begin_mfa_enrollment(self, user_id: str) -> dict[str, str]:
+        secret = generate_totp_secret()
+        encrypted = _mfa_fernet().encrypt(secret.encode("utf-8")).decode("ascii")
+        moment = now_iso()
+        with self._connection() as conn:
+            row = conn.execute("select tenant_id from users where user_id=?", (user_id,)).fetchone()
+            if not row:
+                raise AuthError("用户不存在")
+            conn.execute(
+                """insert into user_mfa(user_id,tenant_id,secret_enc,recovery_hashes_json,enabled_at,last_verified_at,created_at,updated_at)
+                   values(?,?,?,?,null,null,?,?)
+                   on conflict(user_id) do update set secret_enc=excluded.secret_enc,
+                     recovery_hashes_json='[]',enabled_at=null,updated_at=excluded.updated_at""",
+                (user_id, row["tenant_id"], encrypted, "[]", moment, moment),
+            )
+        label = "门店运营系统"
+        uri = f"otpauth://totp/{label}:{user_id}?secret={secret}&issuer={label}&digits=6&period=30"
+        return {"secret": secret, "otpauth_uri": uri}
+
+    def confirm_mfa_enrollment(self, user_id: str, code: str) -> list[str]:
+        with self._connection() as conn:
+            row = conn.execute("select secret_enc from user_mfa where user_id=?", (user_id,)).fetchone()
+        if not row:
+            raise AuthError("尚未开始 MFA 绑定")
+        try:
+            secret = _mfa_fernet().decrypt(row["secret_enc"].encode("ascii")).decode("utf-8")
+        except (InvalidToken, ValueError) as exc:
+            raise AuthError("MFA 密钥无法解密，请重新绑定") from exc
+        if not verify_totp(secret, code):
+            raise CredentialsError("验证码不正确")
+        recovery = [secrets.token_hex(2) + "-" + secrets.token_hex(2) + "-" + secrets.token_hex(2) for _ in range(8)]
+        hashes = [_recovery_hash(item) for item in recovery]
+        with self._connection() as conn:
+            conn.execute(
+                "update user_mfa set recovery_hashes_json=?, enabled_at=?, updated_at=? where user_id=?",
+                (json.dumps(hashes), now_iso(), now_iso(), user_id),
+            )
+        return recovery
+
+    def verify_mfa(self, user_id: str, code: str) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                "select secret_enc,recovery_hashes_json,enabled_at from user_mfa where user_id=?", (user_id,)
+            ).fetchone()
+        if not row or not row["enabled_at"]:
+            return False
+        try:
+            secret = _mfa_fernet().decrypt(row["secret_enc"].encode("ascii")).decode("utf-8")
+        except (InvalidToken, ValueError):
+            return False
+        if verify_totp(secret, code):
+            with self._connection() as conn:
+                conn.execute("update user_mfa set last_verified_at=? where user_id=?", (now_iso(), user_id))
+            return True
+        candidate_hash = _recovery_hash((code or "").strip())
+        hashes = json.loads(row["recovery_hashes_json"] or "[]")
+        remaining = [item for item in hashes if not hmac.compare_digest(item, candidate_hash)]
+        if len(remaining) != len(hashes):
+            with self._connection() as conn:
+                conn.execute("update user_mfa set recovery_hashes_json=?,last_verified_at=?,updated_at=? where user_id=?",
+                             (json.dumps(remaining), now_iso(), now_iso(), user_id))
+            return True
+        return False
+
+    def reset_mfa(self, user_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute("delete from user_mfa where user_id=?", (user_id,))
+
+    def _create_mfa_challenge(self, row: Any, membership: dict[str, Any]) -> dict[str, Any]:
+        token = secrets.token_urlsafe(32)
+        moment = datetime.now()
+        expires = moment + timedelta(minutes=MFA_CHALLENGE_MINUTES)
+        with self._connection() as conn:
+            conn.execute(
+                """insert into mfa_challenges(challenge_hash,user_id,tenant_id,store_id,role,created_at,expires_at)
+                   values(?,?,?,?,?,?,?)""",
+                (hash_token(token), row["user_id"], membership["tenant_id"], membership["store_id"],
+                 membership["role"], moment.isoformat(timespec="seconds"),
+                 expires.isoformat(timespec="seconds")),
+            )
+        return {"mfa_required": True, "mfa_token": token, "expires_at": expires.isoformat(timespec="seconds")}
+
+    def complete_mfa(self, mfa_token: str, code: str, actor_ip: str = "") -> dict[str, Any]:
+        challenge_hash = hash_token(mfa_token or "")
+        moment = datetime.now()
+        with self._connection() as conn:
+            challenge = conn.execute(
+                "select * from mfa_challenges where challenge_hash=?", (challenge_hash,)
+            ).fetchone()
+            if not challenge or challenge["consumed_at"] or challenge["expires_at"] <= moment.isoformat(timespec="seconds"):
+                raise SessionInvalid("MFA 验证已过期，请重新登录")
+            user = conn.execute("select * from users where user_id=?", (challenge["user_id"],)).fetchone()
+            membership = conn.execute(
+                "select * from memberships where user_id=? and store_id=? and status='active'",
+                (challenge["user_id"], challenge["store_id"]),
+            ).fetchone()
+        if not user or not membership or not self.verify_mfa(challenge["user_id"], code):
+            raise CredentialsError("验证码不正确")
+        with self._connection() as conn:
+            conn.execute("update mfa_challenges set consumed_at=? where challenge_hash=?",
+                         (now_iso(), challenge_hash))
+        return self._issue_session(user, dict(membership), actor_ip=actor_ip)
+
+    def _issue_session(self, row: Any, membership: dict[str, Any], actor_ip: str = "") -> dict[str, Any]:
+        token = secrets.token_urlsafe(32)
+        moment = datetime.now()
+        expires = moment + timedelta(hours=self.session_ttl_hours)
+        with self._connection() as conn:
+            conn.execute(
+                """insert into auth_sessions(token_hash,user_id,tenant_id,store_id,role,created_at,
+                   expires_at,last_seen_at) values(?,?,?,?,?,?,?,?)""",
+                (hash_token(token), row["user_id"], membership["tenant_id"], membership["store_id"],
+                 membership["role"], moment.isoformat(timespec="seconds"),
+                 expires.isoformat(timespec="seconds"), moment.isoformat(timespec="seconds")),
+            )
+            conn.execute("update users set last_login_at=? where user_id=?",
+                         (moment.isoformat(timespec="seconds"), row["user_id"]))
+        context = SecurityContext(
+            user_id=row["user_id"], tenant_id=membership["tenant_id"], store_id=membership["store_id"],
+            role=membership["role"], display_name=row["display_name"],
+            session_id=hash_token(token)[:12], expires_at=expires.isoformat(timespec="seconds"),
+            permissions=permissions_for(membership["role"]),
+            mfa_enrollment_required=self.mfa_required_for(membership["role"]) and not self.is_mfa_enabled(row["user_id"]),
+        )
+        self.record_audit(event_type="login_success", actor_type="user", actor_id=row["user_id"],
+                          tenant_id=membership["tenant_id"], store_id=membership["store_id"],
+                          object_type="session", object_id=context.session_id, after={"ip": actor_ip})
+        return {"token": token, "expires_at": context.expires_at, "context": context, "mfa_required": False}
+
     # ---------------- 会话 ----------------
 
     def login(
@@ -496,29 +708,9 @@ class AuthStore:
             raise
 
         self._reset_failures(username)
-        token = secrets.token_urlsafe(32)
-        moment = datetime.now()
-        expires = moment + timedelta(hours=self.session_ttl_hours)
-        with self._connection() as conn:
-            conn.execute(
-                """insert into auth_sessions(token_hash,user_id,tenant_id,store_id,role,created_at,
-                   expires_at,last_seen_at) values(?,?,?,?,?,?,?,?)""",
-                (hash_token(token), row["user_id"], membership["tenant_id"], membership["store_id"],
-                 membership["role"], moment.isoformat(timespec="seconds"),
-                 expires.isoformat(timespec="seconds"), moment.isoformat(timespec="seconds")),
-            )
-            conn.execute("update users set last_login_at=? where user_id=?",
-                         (moment.isoformat(timespec="seconds"), row["user_id"]))
-        context = SecurityContext(
-            user_id=row["user_id"], tenant_id=membership["tenant_id"], store_id=membership["store_id"],
-            role=membership["role"], display_name=row["display_name"],
-            session_id=hash_token(token)[:12], expires_at=expires.isoformat(timespec="seconds"),
-            permissions=permissions_for(membership["role"]),
-        )
-        self.record_audit(event_type="login_success", actor_type="user", actor_id=row["user_id"],
-                          tenant_id=membership["tenant_id"], store_id=membership["store_id"],
-                          object_type="session", object_id=context.session_id, after={"ip": actor_ip})
-        return {"token": token, "expires_at": context.expires_at, "context": context}
+        if self.mfa_required_for(membership["role"]) and self.is_mfa_enabled(row["user_id"]):
+            return self._create_mfa_challenge(row, membership)
+        return self._issue_session(row, membership, actor_ip=actor_ip)
 
     def resolve(self, token: str) -> SecurityContext:
         """校验令牌并返回上下文；过期/撤销/未知一律 SessionInvalid。"""
@@ -549,6 +741,7 @@ class AuthStore:
             user_id=row["user_id"], tenant_id=row["tenant_id"], store_id=row["store_id"], role=row["role"],
             display_name=user["display_name"], session_id=token_hash[:12],
             expires_at=expires.isoformat(timespec="seconds"), permissions=permissions_for(row["role"]),
+            mfa_enrollment_required=self.mfa_required_for(row["role"]) and not self.is_mfa_enabled(row["user_id"]),
         )
 
     def logout(self, token: str, reason: str = "user_logout") -> bool:

@@ -21,6 +21,7 @@ services:
     env_file: .env.production
     environment:
       STORE_AGENT_ENV: production
+      STORE_AGENT_MFA_ENFORCE: "1"
       STORE_AGENT_METRICS_DB: postgresql://${POSTGRES_USER:-mall_ops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mall_ops}
       STORE_AGENT_STORE_DB: postgresql://${POSTGRES_USER:-mall_ops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mall_ops}
       STORE_AGENT_CHAT_DB: postgresql://${POSTGRES_USER:-mall_ops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mall_ops}
