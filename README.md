@@ -3,9 +3,10 @@
 一个面向**单店**的门店运营 Agent：把平台经营数据统一入库，按透明规则生成可派发、可验收、可审计的动作，并通过对话与日报把结论交给店长和店员。
 
 - 门店：武汉狮子座店（`store_id = WH-LION-001`）
-- 形态：本地演示 MVP（仅 `127.0.0.1`），**尚未接入生产鉴权，禁止对外开放或接入真实顾客数据**
-- 技术栈：Python 标准库 + SQLite（**零第三方依赖**）
-- 完整调整方案见上级目录的 `门店运营系统-结构与差距分析及调整方案.md`
+- 形态：单店生产化加固版本，支持 FastAPI + PostgreSQL、云主机 HTTPS、管理岗 TOTP、图片证据和 owner 管理后台
+- 技术栈：Python 3.12 + FastAPI + PostgreSQL 16 + Docker Compose + Caddy
+- 当前验证基线：**316 个自动化用例全部通过**
+- 生产化落地状态与未闭环边界见 `PRODUCTION_READINESS.md`
 
 ---
 
@@ -70,7 +71,7 @@ python -m unittest discover -p "test_*.py"     # Windows
 python3 -m unittest discover -p "test_*.py"    # macOS / Linux
 ```
 
-当前基线：**253 个用例全部通过**（含 FastAPI、PostgreSQL 迁移/等价性/RLS、两套传输层的治理与看板接口、推送与大模型工具调用均用本地桩实测 HTTP）。
+当前基线：**316 个用例全部通过**（含 FastAPI、PostgreSQL 迁移/等价性/RLS、两套传输层的治理与看板接口、推送与大模型工具调用均用本地桩实测 HTTP）。
 
 ---
 
@@ -725,6 +726,7 @@ python store_cli.py purge --apply --export data/archive   # 先归档待删行�
 |---|---|
 | 2026-10-18 | 批次 1：修复 SQLite 连接泄漏（16/16 测试在 Windows 全绿）；新增 `README.md`、`requirements.txt`、`.gitignore`、`config/env.example`、`imports/inbox/` 占位 |
 | 2026-10-18 | 批次 15（P0 #6 收口）：新增 `retention.py` 数据保留与删除策略（20 张表逐表期限、默认只出计划、`--apply` 才删、先归档再删、`retention_purge` 审计）；`store_config.json` 写入 retention 段；CLI 新增 `retention-plan` / `purge`；`gate-check` 增加"保留策略已配置"检查；新增 13 个测试（253/253 通过） |
+| 2026-10-18 | 生产化加固：CLI 编码、严格 CSP、TOTP MFA、HttpOnly Cookie、租户级备份/保留期、按规则数据就绪闸门、Docker Compose + Caddy、健康检查、图片证据、管理后台、任务验收与 D+7/D+28 结果模块；316 个用例全部通过 |
 | 2026-10-18 | 批次 14（P0 闸门）：新增 `ops_backup.py`（逻辑备份/恢复/演练，内容哈希对账，PG 演练用临时数据库）与 `security.py`（Webhook 验签+nonce 重放防护、凭据轮换清单与 PostgreSQL 口令轮换、危险能力与明文密钥自检）；`store_cli.py` 新增 `backup/restore/drill/gate-check`；P0 十项闸门全部有可复现验证；新增 27 个测试（240/240 通过） |
 | 2026-10-18 | 批次 13（二期-7）：新增 `llm_agent.py`（OpenAI 兼容工具调用：8 个只读工具 + 按角色过滤 + 调度容错 + `agent_tool_runs`/审计留痕 + 轮次上限）；`store_agent` 兜底路径优先走工具调用并可优雅降级；两套传输层与 `/api/bootstrap` 暴露 `llm_mode`；新增 14 个测试（213/213 通过，模型侧用本地兼容桩实测 HTTP） |
 | 2026-10-18 | 批次 12（二期-6）：新增 `notify.py`（日报/逾期/待审批/质量四类消息 + 飞书/企微/outbox 三通道 + 发送账本幂等）与 `notifications` 表；`store_cli.py` 新增 `notify`/`notify-history`；`daily_sync.ps1` 接入日报推送（默认草稿）；新增 16 个测试（199/199 通过） |
