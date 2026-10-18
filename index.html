@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>门店运营系统｜武汉狮子座店试点方案</title>
+  <style>
+    :root{--bg:#f4f6f9;--paper:#fff;--ink:#162033;--muted:#667085;--line:#e2e7ef;--navy:#101828;--blue:#3156d3;--cyan:#0e7490;--green:#067647;--orange:#b54708;--red:#b42318;--purple:#6941c6;--shadow:0 18px 48px rgba(16,24,40,.08)}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.68 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    a{color:var(--blue)}.layout{max-width:1260px;margin:auto;padding:28px 20px 80px}.hero{position:relative;overflow:hidden;border-radius:26px;padding:44px;background:linear-gradient(132deg,#0b1224 0%,#183879 62%,#19647e 100%);color:#fff;box-shadow:var(--shadow)}
+    .hero:after{content:"";position:absolute;right:-80px;top:-120px;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,rgba(105,216,255,.22),transparent 68%)}.eyebrow{font-size:12px;letter-spacing:.16em;color:#a9dff4}.hero h1{font-size:42px;line-height:1.15;margin:10px 0 14px;max-width:900px}.hero p{font-size:16px;color:#d9e7f4;max-width:920px;margin:0}.chips{display:flex;gap:9px;flex-wrap:wrap;margin-top:24px}.chip{font-size:12px;padding:6px 10px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.08)}
+    .toolbar{position:sticky;top:8px;z-index:10;display:flex;align-items:center;justify-content:space-between;gap:15px;margin:16px 0;padding:11px 14px;border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.94);backdrop-filter:blur(10px);box-shadow:0 8px 26px rgba(16,24,40,.06)}.nav{display:flex;gap:8px;overflow:auto}.nav a{white-space:nowrap;text-decoration:none;color:#475467;padding:6px 9px;border-radius:8px}.nav a:hover{background:#eef3ff;color:var(--blue)}.actions{display:flex;gap:8px}.btn{border:1px solid #cfd6e3;background:#fff;color:var(--ink);border-radius:9px;padding:8px 11px;cursor:pointer;white-space:nowrap}.btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+    .statusline{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}.metric{background:#fff;border:1px solid var(--line);border-radius:15px;padding:16px}.metric b{display:block;font-size:23px;line-height:1.2}.metric span{font-size:12px;color:var(--muted)}
+    .panel{background:var(--paper);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);padding:27px;margin:16px 0;scroll-margin-top:85px}h2{font-size:25px;line-height:1.3;margin:0 0 13px}h3{font-size:17px;margin:22px 0 8px}h4{font-size:14px;margin:0 0 5px}p{margin:7px 0}.muted{color:var(--muted)}.small{font-size:12px}.lead{font-size:16px;color:#344054}
+    .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.card{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fff}.card h3{margin:0 0 7px}.card p:last-child{margin-bottom:0}.accent{background:linear-gradient(145deg,#f5f8ff,#effbfd);border-color:#cbd9f5}
+    .callout{padding:15px 17px;border-radius:13px;border-left:4px solid var(--blue);background:#f2f6ff;margin:12px 0}.success{border-left-color:var(--green);background:#edfdf3}.warning{border-left-color:var(--orange);background:#fff8eb}.danger{border-left-color:var(--red);background:#fff3f2}.purple{border-left-color:var(--purple);background:#f7f4ff}
+    .tag{display:inline-block;padding:3px 8px;border-radius:999px;font-weight:700;font-size:11px;white-space:nowrap}.ready{color:#05603a;background:#dcfae6}.pilot{color:#2949aa;background:#e8eeff}.gate{color:#93370d;background:#fff1cc}.stop{color:#912018;background:#fee4e2}.unknown{color:#475467;background:#eef1f5}
+    .scroll{overflow:auto;border:1px solid var(--line);border-radius:13px}table{border-collapse:collapse;width:100%;min-width:780px}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:10px 9px}th{font-size:12px;color:#475467;background:#f8fafc}tr:last-child td{border-bottom:0}td ul{margin:0;padding-left:18px}
+    .flow{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin:15px 0}.flow-item{position:relative;text-align:center;padding:13px 8px;border:1px solid #cfd9ee;border-radius:12px;background:#f7f9ff;font-weight:700}.flow-item:after{content:"→";position:absolute;right:-13px;color:#8392b5}.flow-item:last-child:after{display:none}.flow-item small{display:block;color:var(--muted);font-weight:400;margin-top:3px}
+    .architecture{display:grid;grid-template-columns:1fr 50px 1.25fr 50px 1.1fr;align-items:stretch;gap:8px}.stack{display:grid;gap:8px}.box{padding:13px;border:1px solid var(--line);border-radius:12px;background:#fbfcfe}.arrow{display:grid;place-items:center;font-size:28px;color:#98a2b3}.box strong{display:block}.box small{color:var(--muted)}
+    .phase{display:grid;grid-template-columns:135px 1fr 140px;gap:16px;padding:15px 0;border-bottom:1px solid var(--line)}.phase:last-child{border:0}.phase-time{font-weight:800;color:var(--blue)}.phase-gate{text-align:right}.checklist{display:grid;gap:8px}.check{display:flex;gap:10px;padding:11px;border:1px solid var(--line);border-radius:11px;background:#fbfcfe}.check input{margin-top:4px;transform:scale(1.12)}.check.done{background:#effbf4;border-color:#b7e7ca}.progress{height:8px;background:#e8ecf2;border-radius:999px;overflow:hidden;margin:9px 0}.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,#12a36d,#3156d3);transition:.2s}
+    input,textarea,select{font:inherit;color:var(--ink);width:100%;border:1px solid #cfd6e3;border-radius:8px;background:#fff;padding:8px 9px}textarea{min-height:72px;resize:vertical}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#eef1f5;padding:2px 5px;border-radius:5px}.codeblock{background:#101828;color:#e6edf7;border-radius:13px;padding:15px 17px;overflow:auto;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.quote{font-size:16px;padding:17px 20px;border-radius:14px;background:#f8fafc;border:1px solid var(--line)}.quote del{color:#98a2b3}.footer{text-align:center;color:var(--muted);font-size:12px;padding-top:16px}
+    @media(max-width:900px){.statusline,.grid3{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.flow-item:after{content:"↓";right:auto;left:50%;bottom:-17px;top:auto}.architecture{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}.phase{grid-template-columns:1fr}.phase-gate{text-align:left}.hero{padding:30px}.hero h1{font-size:32px}.toolbar{position:static;display:block}.actions{margin-top:8px}.layout{padding:12px 9px 50px}}
+    @media print{body{background:#fff}.layout{max-width:none;padding:0}.toolbar,.btn{display:none}.panel,.hero{box-shadow:none;break-inside:avoid}.panel{margin:10px 0}.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}.check{break-inside:avoid}.scroll{overflow:visible}table{min-width:0;font-size:11px}}
+  </style>
+</head>
+<body>
+<main class="layout">
+  <section class="hero">
+    <div class="eyebrow">STORE OPERATIONS SYSTEM · IMPLEMENTATION V1</div>
+    <h1>门店运营系统<br/>武汉狮子座店首店试点方案</h1>
+    <p>产品核心是一个常驻的门店运营 Agent：店长和店员可以随时对话，询问经营情况、今日任务、操作方法与执行依据。Agent 同时连接平台经营、评价口碑、团购套餐、员工协同、老板报表、竞品监控和内容运营能力。</p>
+    <div class="chips"><span class="chip">方案日期：2026-09-03</span><span class="chip">首店试点：武汉狮子座店</span><span class="chip">建议周期：8 周</span><span class="chip">旧系统基线：fdb1564</span><span class="chip">状态：可启动准备，不可直接投产</span></div>
+  </section>
+
+  <section class="toolbar">
+    <nav class="nav"><a href="#verdict">结论</a><a href="#agent">Agent</a><a href="#loop">闭环</a><a href="#data">数据</a><a href="#rules">规则</a><a href="#architecture">架构</a><a href="#roadmap">路线</a><a href="#pilot">试点</a><a href="#security">安全</a><a href="#start">启动</a></nav>
+    <div class="actions"><button class="btn" onclick="window.print()">打印 / 存 PDF</button><button class="btn primary" onclick="saveNow()">保存填写内容</button></div>
+  </section>
+
+  <section class="statusline">
+    <div class="metric"><b>1 Agent</b><span>店长和店员随时对话的统一入口</span></div>
+    <div class="metric"><b>4 类</b><span>首批动作：评价、差评、套餐、任务升级</span></div>
+    <div class="metric"><b>0 次</b><span>未经确认的价格/赔付/警告/奖惩</span></div>
+    <div class="metric"><b>20%</b><span>待验证的目标假设，不是承诺</span></div>
+  </section>
+
+  <section class="panel" id="verdict">
+    <h2>一、先给结论</h2>
+    <div class="callout success"><b>产品统一命名为“门店运营系统”，核心交互是“门店运营 Agent”。</b>店长和店员不需要理解复杂报表，通过对话就能查询、解释和推进工作；看板、规则、任务和报表都是 Agent 背后的能力。</div>
+    <div class="grid2">
+      <div class="card"><h3>原文里最有价值的部分</h3><ul><li>跨平台经营数据统一口径；</li><li>把漏洞拆成店长可执行的最小动作；</li><li>任务有负责人、期限、证据和升级；</li><li>周报、月报把“结果”与“执行”放到一起；</li><li>竞品与内容运营成为后续增长模块。</li></ul></div>
+      <div class="card"><h3>必须修正的四个表述</h3><ul><li>“打通各个平台”取决于商家授权、开放范围和服务商资格，不能先承诺；</li><li>“拉多少好评”应改为合规邀请多少真实顾客评价，禁止购买、诱导或伪造评价；</li><li>“员工完不成直接警告/奖惩”必须由管理者复核，系统只能提供证据和草稿；</li><li>“流量上涨 20%”只能作为试点目标，必须用对照和归因验证。</li></ul></div>
+    </div>
+    <h3>建议对外产品表达</h3>
+    <div class="quote"><del>AI 自动把门店流量提升 20%</del><br/><b>每天告诉店长最该做的三件线上运营动作，追踪是否完成，并用 8 周真实数据验证门店曝光、转化与核销是否改善。</b></div>
+    <div class="callout warning"><b>当前代码复用结论：</b>现有 lplv2 可复用前端框架、任务状态机、飞书接入、定时调度和报表思路；平台连接器、经营指标模型、规则版本、证据链、审批闸门和真正的租户隔离需要新建。旧系统已发现鉴权、凭据、数据隔离与危险接口问题，P0 整改前不得承载真实平台账号和顾客数据。</div>
+    <h3>一个 Agent，九个功能域</h3>
+    <div class="grid3">
+      <div class="card"><h4>经营驾驶舱</h4><p>营收、开台、订单、核销、毛利与异常。</p></div>
+      <div class="card"><h4>平台运营</h4><p>美团、抖音等平台曝光、访问和转化。</p></div>
+      <div class="card"><h4>评价与客服</h4><p>真实评价邀请、差评 SLA、问题复盘。</p></div>
+      <div class="card"><h4>团购与商品</h4><p>套餐结构、价格、库存、时段和审批。</p></div>
+      <div class="card"><h4>任务与巡店</h4><p>每日动作、证据、复核、逾期升级。</p></div>
+      <div class="card"><h4>员工执行</h4><p>完成率、质量、提醒、申诉和奖惩建议。</p></div>
+      <div class="card"><h4>竞品监控</h4><p>公开价格、套餐、活动与商圈变化。</p></div>
+      <div class="card"><h4>内容运营</h4><p>选题、短视频、发布审批与到店归因。</p></div>
+      <div class="card"><h4>随时对话 Agent</h4><p>按身份回答、解释任务、指导执行和发起审批。</p></div>
+    </div>
+  </section>
+
+  <section class="panel" id="agent">
+    <h2>二、门店运营 Agent：所有人的统一入口</h2>
+    <p class="lead">店长和店员随时打开网页、飞书或企微与 Agent 对话。Agent 先识别“谁在问、能看什么”，再读取门店数据、任务和 SOP，最后给出带依据的回答。</p>
+    <div class="flow">
+      <div class="flow-item">1. 身份<small>店长/店员</small></div><div class="flow-item">2. 意图<small>查询/解释/执行</small></div><div class="flow-item">3. 权限<small>租户/门店/角色</small></div><div class="flow-item">4. 上下文<small>数据/任务/SOP</small></div><div class="flow-item">5. 工具<small>只读/草稿</small></div><div class="flow-item">6. 回答<small>结论+依据</small></div><div class="flow-item">7. 留痕<small>会话/工具/审批</small></div>
+    </div>
+    <div class="grid2">
+      <div class="card accent"><span class="tag pilot">店长 Agent</span><h3>看全店、问原因、做决策</h3><p>可问：“今天全店最重要的三件事是什么？”“这个套餐为什么要调整？”“哪项任务逾期了？”“昨天差评有没有闭环？”</p><p class="muted">可见全店任务与经营诊断；改价、赔付、警告、奖惩、发布仍需审批。</p></div>
+      <div class="card accent"><span class="tag ready">店员 Agent</span><h3>看本人任务、问方法、交证据</h3><p>可问：“我今天做什么？”“这个差评该怎么接待？”“完成任务要传什么？”“顾客反馈套餐限制怎么办？”</p><p class="muted">只看本人任务、操作步骤和非敏感信息；不可查看毛利、工资或全店员工数据。</p></div>
+    </div>
+    <h3>Agent 必须遵守的回答契约</h3>
+    <div class="scroll"><table><thead><tr><th>规则</th><th>Agent 行为</th><th>验收</th></tr></thead><tbody>
+      <tr><td>身份优先</td><td>每次工具调用都由服务端带入 tenant、store、user、role，绝不相信前端自行声明。</td><td>店员询问毛利返回无权；跨店查询返回 403。</td></tr>
+      <tr><td>有据可查</td><td>经营回答附数据日期和来源；任务回答附规则版本与任务 ID。</td><td>缺数时明确说缺数，不编造经营结论。</td></tr>
+      <tr><td>最小可见</td><td>店员只看到本人任务；顾客手机号、工资、密钥不进入模型上下文。</td><td>敏感字段脱敏测试和提示词攻击测试通过。</td></tr>
+      <tr><td>分级执行</td><td>只读可直接答；内部草稿可生成；外发与高风险动作必须审批。</td><td>未经确认的改价、赔付、警告、奖惩、发布为 0。</td></tr>
+      <tr><td>会话留痕</td><td>保存用户问题、Agent 回答、引用来源、工具调用和审批结果。</td><td>可以从老板周报反查到原始任务和会话。</td></tr>
+    </tbody></table></div>
+    <div class="callout purple"><b>已提供可运行 MVP：</b><code>agent_server.py</code> + <code>agent.html</code>。它已支持店长/店员身份切换、角色可见任务、自然语言意图、敏感信息拦截、高风险审批提示和本地会话记录；配置兼容接口的环境变量后，开放式问题可进入大模型。当前身份与经营数据仍是演示配置，不是生产登录或真实平台数据。</div>
+  </section>
+
+  <section class="panel" id="loop">
+    <h2>三、Agent 背后必须跑通的业务闭环</h2>
+    <p class="lead">系统每天不是“发一份报告”，而是完成下面七步，并能从最终结果反查每一步证据。</p>
+    <div class="flow">
+      <div class="flow-item">1. 采集<small>API/导出/POS</small></div><div class="flow-item">2. 对账<small>缺数与延迟</small></div><div class="flow-item">3. 诊断<small>规则优先</small></div><div class="flow-item">4. 派单<small>人/时/目标</small></div><div class="flow-item">5. 举证<small>记录/截图</small></div><div class="flow-item">6. 复核<small>通过/驳回</small></div><div class="flow-item">7. 归因<small>指标是否改善</small></div>
+    </div>
+    <div class="grid3">
+      <div class="card accent"><h3>店长早报</h3><p>每天 09:00 只给 3–5 件优先事项，写清目标、原因、截止时间与证据；数据缺失时显示“缺数”，不生成假建议。</p></div>
+      <div class="card accent"><h3>执行工作台</h3><p>员工接受、完成、上传证据；超时先提醒，再由区域负责人判断是否升级，不由算法直接处罚。</p></div>
+      <div class="card accent"><h3>老板周/月报</h3><p>同时看经营结果、任务执行率、规则命中率、错误建议率和人工节省时间，奖惩仅使用已复核结果。</p></div>
+    </div>
+    <h3>动作的强制字段</h3>
+    <div class="scroll"><table><thead><tr><th>字段</th><th>示例</th><th>为什么必须有</th></tr></thead><tbody>
+      <tr><td>问题与数据来源</td><td>套餐近 7 日详情 168、支付 5，来源：美团商家导出 09:02</td><td>让店长知道不是 AI 猜的。</td></tr>
+      <tr><td>最小动作</td><td>只调整主图；价格、时长、文案保持不变</td><td>一次只改一个变量，才能判断效果。</td></tr>
+      <tr><td>负责人 / 截止</td><td>线上运营 / 今日 17:00</td><td>避免“大家负责”等于没人负责。</td></tr>
+      <tr><td>验收证据</td><td>调整前后快照、审批号、上线时间</td><td>“已回复”“已处理”不能作为完成证据。</td></tr>
+      <tr><td>审批级别</td><td>价格变更：店长 + 区域负责人</td><td>把读、建议、草稿、执行四级权限分开。</td></tr>
+      <tr><td>结果窗口</td><td>连续 7 天后比较详情→支付转化率</td><td>完成动作不等于产生业务结果。</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section class="panel" id="data">
+    <h2>四、数据接入：先确认拿得到，再谈 AI</h2>
+    <div class="callout"><b>接入原则：</b>优先使用商家授权的官方接口或官方导出；没有接口就用人工导入跑通业务闭环。浏览器自动化只用于低风险、可回滚的草稿操作，不抓顾客隐私，不绕过平台限制。</div>
+    <div class="grid2">
+      <div class="card"><span class="tag ready">官方能力已核验</span><h3>美团</h3><p>美团技术服务合作中心公开提供三方服务商、连锁品牌入驻，首页明确包含“多门店统一管理，数据全渠道打通”和到店团购核销能力。</p><p class="muted small">结论：存在正式接入路径；武汉狮子座店能拿到哪些经营字段，必须登录主体账号后按业务线和授权范围实测。<a href="https://developer.meituan.com/" target="_blank" rel="noreferrer">官方平台</a></p></div>
+      <div class="card"><span class="tag ready">官方能力已核验</span><h3>抖音</h3><p>抖音开放平台公开提供生活服务解决方案，覆盖团购商品售卖、预约、营销运营、用户服务及到店核销等场景。</p><p class="muted small">结论：可走商家/服务商正式授权；曝光、访问、评价等分析字段仍需在应用权限清单里逐项确认。<a href="https://developer.open-douyin.com/capacity-center-page/" target="_blank" rel="noreferrer">官方能力中心</a></p></div>
+    </div>
+    <div class="scroll"><table><thead><tr><th>来源</th><th>首批字段</th><th>首选方式</th><th>当前状态</th><th>失败时降级</th></tr></thead><tbody>
+      <tr><td>美团 / 大众点评商家侧</td><td>曝光、访问、订单、核销、套餐、评价、回复状态</td><td>商家授权官方能力 / 服务商接口</td><td><span class="tag gate">接入路径明确，字段待账号核验</span></td><td>每日官方报表导出并校验；写操作只到草稿。</td></tr>
+      <tr><td>抖音生活服务</td><td>门店、商品、内容、曝光、订单、核销、评价</td><td>生活服务商家授权能力 / 服务商接口</td><td><span class="tag gate">生活服务能力明确，字段待授权</span></td><td>官方导出；不以个人账号爬虫作为生产方案。</td></tr>
+      <tr><td>收银 / PMS</td><td>营业额、房型、开台、时段、订单与核销映射</td><td>厂商 API 或每日结构化导出</td><td><span class="tag unknown">厂商待填</span></td><td>固定 CSV 模板 + 哈希校验 + 人工复核。</td></tr>
+      <tr><td>飞书 / 企业微信</td><td>组织、负责人、任务、提醒、审批、周报</td><td>企业自建应用 + 最小权限</td><td><span class="tag pilot">可复用部分代码</span></td><td>系统内工作台；消息先预览再发送。</td></tr>
+      <tr><td>竞品数据</td><td>公开价格、时长、可售时段、活动</td><td>合规数据供应商 / 人工采集</td><td><span class="tag gate">第二阶段</span></td><td>每周人工采样，不抓登录后或受限内容。</td></tr>
+      <tr><td>短视频内容</td><td>主题、发布时间、播放、互动、到店/订单线索</td><td>官方账号授权数据</td><td><span class="tag gate">第二阶段</span></td><td>人工录入发布链接和平台数据。</td></tr>
+    </tbody></table></div>
+    <h3>已落地的数据底座</h3>
+    <div class="callout success"><b>不是只写方案：</b>本目录已经新增 <code>platform_data.py</code>、<code>platform_sync.py</code> 和统一 CSV 模板。现在可把两个平台官方报表落入同一 SQLite 指标库，自动完成字段校验、门店校验、重复批次识别、按天幂等更新、数据新鲜度和近 7 天/前周期对比；Agent 已能直接回答“分析最近 7 天美团和抖音数据”。没有真实导入时，它会明确回答“未同步”。</div>
+    <div class="codeblock"># 1. 复制并填写 imports/平台数据导入模板.csv
+python3 platform_sync.py --store-id WH-LION-001 import-csv /path/to/meituan.csv
+python3 platform_sync.py --store-id WH-LION-001 import-csv /path/to/douyin.csv
+
+# 2. 查看数据新鲜度与近 7 天摘要
+python3 platform_sync.py --store-id WH-LION-001 status
+python3 platform_sync.py --store-id WH-LION-001 summary --days 7
+
+# 3. 启动 Agent；页面顶部会显示两个平台的数据日期
+python3 agent_server.py --port 8766</div>
+    <h3>Day 0 接口资格核验表</h3>
+    <div class="scroll"><table><tbody>
+      <tr><th>美团商家主体 / 账号</th><td><input data-save="meituan-account" placeholder="填写主体和账号负责人" /></td><th>可导出报表</th><td><input data-save="meituan-export" placeholder="填写报表名称与周期" /></td></tr>
+      <tr><th>抖音生活服务主体 / 账号</th><td><input data-save="douyin-account" placeholder="填写主体和账号负责人" /></td><th>可授权数据范围</th><td><input data-save="douyin-scope" placeholder="待开发者后台实测" /></td></tr>
+      <tr><th>收银 / PMS 厂商</th><td><input data-save="pms-vendor" placeholder="填写厂商、版本、联系人" /></td><th>门店唯一编码</th><td><input data-save="store-code" value="WH-LION-001" /></td></tr>
+      <tr><th>数据负责人</th><td><input data-save="data-owner" placeholder="填写姓名" /></td><th>账号安全负责人</th><td><input data-save="security-owner" placeholder="填写姓名" /></td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section class="panel" id="rules">
+    <h2>五、首批四类规则如何真正工作</h2>
+    <div class="scroll"><table><thead><tr><th>场景</th><th>输入</th><th>计算/判断</th><th>生成动作</th><th>人工闸门</th></tr></thead><tbody>
+      <tr><td><b>真实评价邀请</b></td><td>昨日真实订单、可联系顾客数、本周期评价目标、剩余天数</td><td><code>min(可联系真实顾客, ceil(目标缺口/剩余天数))</code></td><td>分配今日合规邀请数量，记录脱敏订单号和执行人</td><td>不得好评返现、选择性邀评、购买或伪造评价。</td></tr>
+      <tr><td><b>差评处置</b></td><td>新差评、创建时间、问题类型、是否可联系</td><td>超过 4 小时未接单→紧急；重复问题→门店整改项</td><td>回复草稿、责任人、补救建议、复盘标签</td><td>赔付、电话联系、公开回复必须按权限确认。</td></tr>
+      <tr><td><b>套餐优化</b></td><td>曝光→访问→支付→核销、售价、可变成本、时段</td><td>先定位漏斗掉点；低样本不下结论；保护毛利底线</td><td>一次只改主图/标题/价格/时段中的一个变量</td><td>改价、库存、适用门店和发布必须审批。</td></tr>
+      <tr><td><b>任务升级</b></td><td>任务要求、截止、证据、逾期次数、员工反馈</td><td>到期无有效证据→逾期；连续逾期→管理复核</td><td>提醒→主管复核→警告草稿→老板奖惩建议</td><td>系统绝不直接给员工定罚款或纪律处分。</td></tr>
+    </tbody></table></div>
+    <h3>武汉狮子座店早报演示</h3>
+    <p class="muted">以下数字仅用于演示规则怎样生成任务，不代表武汉狮子座店的真实经营情况；接入真实报表后必须全部替换。</p>
+    <div class="grid2">
+      <div class="card"><span class="tag ready">可直接派单</span><h3>邀请 2 位真实到店顾客评价</h3><p>周期目标差 22 条，剩余 11 天，今日可联系 12 人，因此今日目标为 2。证据：脱敏订单号、邀请时间、执行员工。</p></div>
+      <div class="card"><span class="tag gate">赔付需审批</span><h3>4 小时内处理待回复差评</h3><p>差评已等待 6 小时，优先级紧急。先生成回复和补救草稿；若涉及赔付，由店长/区域负责人审批。</p></div>
+      <div class="card"><span class="tag gate">套餐变更需审批</span><h3>复核 AI 全周小包 2h</h3><p>近 7 日详情 168、支付 5，转化 3.0%。先核对数据和毛利，再提出单变量实验，不直接改价发布。</p></div>
+      <div class="card"><span class="tag gate">管理复核</span><h3>复核连续两次逾期任务</h3><p>系统汇总原任务、截止与证据缺口；区域负责人先听取员工说明，再决定是否发内部警告。</p></div>
+    </div>
+    <div class="callout purple"><b>AI 应放在哪里：</b>差评分类、回复草稿、异常解释、周报摘要和竞品差异总结可用大模型；目标计算、权限、SLA、毛利底线、审批与奖惩必须用确定性规则。这样结果可复现、可审计。</div>
+  </section>
+
+  <section class="panel" id="architecture">
+    <h2>六、生产架构与现有代码复用</h2>
+    <div class="architecture">
+      <div class="stack">
+        <div class="box"><strong>平台连接器</strong><small>美团、抖音生活服务、POS/PMS、飞书/企微</small></div>
+        <div class="box"><strong>人工导入通道</strong><small>CSV/XLSX 模板、字段校验、重复检测、批次哈希</small></div>
+        <div class="box"><strong>Webhook 接收</strong><small>签名、时间窗、重放保护、幂等键</small></div>
+      </div><div class="arrow">→</div>
+      <div class="stack">
+        <div class="box"><strong>原始快照层</strong><small>不可变、脱敏、保留来源和抓取时间</small></div>
+        <div class="box"><strong>统一指标层</strong><small>门店/日期/平台/指标；口径版本化</small></div>
+        <div class="box"><strong>规则与诊断引擎</strong><small>阈值、漏斗、SLA、样本量、毛利保护</small></div>
+        <div class="box"><strong>动作与证据引擎</strong><small>派单、截止、证据、复核、升级、撤销</small></div>
+      </div><div class="arrow">→</div>
+      <div class="stack">
+        <div class="box"><strong>门店运营 Agent</strong><small>店长/店员对话、工具编排、引用与会话</small></div>
+        <div class="box"><strong>店长工作台</strong><small>今日三件事、异常、完成证据</small></div>
+        <div class="box"><strong>审批中心</strong><small>价格、赔付、外发、警告、奖惩</small></div>
+        <div class="box"><strong>老板驾驶舱</strong><small>结果、执行率、归因、成本与风险</small></div>
+        <div class="box"><strong>审计与告警</strong><small>谁在何时看了什么、改了什么、为什么</small></div>
+      </div>
+    </div>
+    <h3>复用 / 新建 / 禁用清单</h3>
+    <div class="scroll"><table><thead><tr><th>能力</th><th>决策</th><th>处理</th></tr></thead><tbody>
+      <tr><td>Vue 工作台、基础页面组件</td><td><span class="tag pilot">复用</span></td><td>复用视觉和路由，不复用前端默认管理员逻辑。</td></tr>
+      <tr><td>FastAPI 服务与任务状态思路</td><td><span class="tag pilot">整改后复用</span></td><td>拆成独立模块，所有接口统一鉴权、RBAC、tenant/store 过滤。</td></tr>
+      <tr><td>飞书同步 / 消息能力</td><td><span class="tag gate">最小权限复用</span></td><td>密钥轮换；默认只生成草稿，发送需审批和幂等。</td></tr>
+      <tr><td>平台连接器、统一经营事实表</td><td><span class="tag ready">新建</span></td><td>按官方授权能力逐个平台实现，先读后写。</td></tr>
+      <tr><td>规则版本、任务证据、审批、审计</td><td><span class="tag ready">新建</span></td><td>使用本目录 <code>schema.sql</code> 作为首版模型起点。</td></tr>
+      <tr><td>全局变量承载用户/空间、默认空间回退</td><td><span class="tag stop">禁用</span></td><td>改为请求上下文；无权或缺 scope 时直接拒绝。</td></tr>
+      <tr><td>Shell、任意文件、无确认外部写操作</td><td><span class="tag stop">下线</span></td><td>不属于门店试点，风险大于业务价值。</td></tr>
+    </tbody></table></div>
+    <h3>首批 API 合约</h3>
+    <div class="grid2">
+      <div class="codeblock">POST /v1/ingestions/manual\nPOST /v1/ingestions/{id}/validate\nGET  /v1/stores/{store_id}/data-quality\nGET  /v1/stores/{store_id}/metrics/daily\nPOST /v1/actions/generate?mode=dry-run</div>
+      <div class="codeblock">POST /v1/agent/chat\nGET  /v1/agent/sessions/{id}\nGET  /v1/tasks/today\nPOST /v1/tasks/{id}/accept\nPOST /v1/tasks/{id}/evidence\nPOST /v1/tasks/{id}/verify\nPOST /v1/approvals/{id}/decide\nGET  /v1/reports/weekly</div>
+    </div>
+  </section>
+
+  <section class="panel" id="roadmap">
+    <h2>七、8 周从零到真实试点</h2>
+    <div class="phase"><div class="phase-time">第 0 周<br/>立项闸门</div><div><b>账号、数据、负责人和边界确认</b><p>确定试点门店、平台主体、可导出报表、PMS 厂商、员工负责人；采集最近 28 天基线。完成凭据轮换、内网/VPN、鉴权和危险接口下线。</p></div><div class="phase-gate"><span class="tag stop">P0 未过不开发接入</span></div></div>
+    <div class="phase"><div class="phase-time">第 1–2 周<br/>对话 Agent MVP</div><div><b>先让店长和店员真实使用</b><p>完成企业身份、角色权限、会话记录、任务问答、SOP 指导、敏感信息拦截和审批草稿；经营数据先用官方导出，避免等待平台资质。</p></div><div class="phase-gate"><span class="tag pilot">验收：连续 5 天对话</span></div></div>
+    <div class="phase"><div class="phase-time">第 3–4 周<br/>只读连接</div><div><b>选择一个最确定的平台自动同步</b><p>只读拉取、增量游标、幂等、断点续传、数据延迟告警、人工报表对账。另一平台仍保留人工导入。</p></div><div class="phase-gate"><span class="tag pilot">准确率 ≥99%</span></div></div>
+    <div class="phase"><div class="phase-time">第 5–6 周<br/>执行闭环</div><div><b>任务、证据、复核和内部提醒</b><p>上线角色权限、任务 SLA、证据验真、升级草稿、规则版本与审计；差评回复、套餐调整仍只生成草稿。</p></div><div class="phase-gate"><span class="tag gate">未经确认外发=0</span></div></div>
+    <div class="phase"><div class="phase-time">第 7–8 周<br/>量化复盘</div><div><b>验证效果而非展示功能</b><p>比较试点前后与对照门店的曝光、访问、支付、核销、评价响应和人工工时；评估规则误报与店长采纳率。</p></div><div class="phase-gate"><span class="tag ready">GO / HOLD</span></div></div>
+    <div class="callout warning"><b>时间不包含：</b>平台商务签约、服务商资质审核、PMS 厂商定制排期。这三项可能决定真实接入周期，应在第 0 周就拿到书面结论。</div>
+    <h3>最低团队与预算级别</h3>
+    <div class="scroll"><table><thead><tr><th>角色</th><th>投入</th><th>职责</th></tr></thead><tbody>
+      <tr><td>业务负责人 / 产品</td><td>0.5–1 人</td><td>指标口径、规则、负责人、试点推进和验收。</td></tr>
+      <tr><td>后端 / 数据工程</td><td>1–2 人</td><td>连接器、事实表、规则、任务、审批、审计。</td></tr>
+      <tr><td>前端</td><td>0.5–1 人</td><td>店长工作台、证据、老板驾驶舱。</td></tr>
+      <tr><td>测试 / 安全</td><td>0.25–0.5 人</td><td>权限矩阵、跨店隔离、回归、恢复演练。</td></tr>
+      <tr><td>门店店长 + 线上运营</td><td>每日 15–30 分钟</td><td>执行动作、上传证据、反馈错误建议。</td></tr>
+    </tbody></table></div>
+    <p class="muted small">若团队已有工程人员，8 周内部试点按人力折算通常是一个小型产品迭代，不建议先采购昂贵“大模型中台”。平台接口费、服务商费和 PMS 定制费必须拿报价后单列，本方案不凭空填数字。</p>
+  </section>
+
+  <section class="panel" id="pilot">
+    <h2>八、如何证明“流量上涨 20%”</h2>
+    <div class="callout danger"><b>不能用“上线前一个月 vs 上线后一个月”直接下结论。</b>节假日、商圈活动、价格、天气、内容爆款和平台自然波动都会影响流量。至少要保留对照门店或使用分批上线设计。</div>
+    <div class="grid3">
+      <div class="card"><h3>主指标</h3><p>平台曝光、门店/套餐详情访问、支付订单、核销订单、核销 GMV。</p></div>
+      <div class="card"><h3>过程指标</h3><p>差评首响时长、评价邀请覆盖、任务按时完成率、建议采纳率、有效证据率。</p></div>
+      <div class="card"><h3>护栏指标</h3><p>毛利率、退款率、投诉率、误发次数、越权次数、店长额外工时。</p></div>
+    </div>
+    <h3>建议试验设计</h3>
+    <div class="scroll"><table><thead><tr><th>项目</th><th>要求</th><th>验收口径</th></tr></thead><tbody>
+      <tr><td>基线期</td><td>试点前连续 28 天；保存每日原始报表</td><td>字段完整率 ≥95%，异常日期单独标记。</td></tr>
+      <tr><td>观察期</td><td>上线后至少 28 天；同一指标口径</td><td>不可用“最好的一周”代表全周期。</td></tr>
+      <tr><td>对照</td><td>优先选商圈/体量相近且暂未上线的门店</td><td>比较相对变化，而不是只看试点店绝对变化。</td></tr>
+      <tr><td>动作日志</td><td>记录价格、投流、活动、内容、营业时间等干扰因素</td><td>无法解释的重大变动不得归因给 AI。</td></tr>
+      <tr><td>成功门槛</td><td>数据由项目发起人填写并签字</td><td>建议：曝光或详情访问相对提升 ≥20%，且支付/核销不恶化、毛利不跌破底线。</td></tr>
+    </tbody></table></div>
+    <h3>试点目标填写</h3>
+    <div class="scroll"><table><tbody>
+      <tr><th>基线开始</th><td><input type="date" data-save="baseline-start" /></td><th>观察开始</th><td><input type="date" data-save="observation-start" /></td></tr>
+      <tr><th>试点门店</th><td><input data-save="pilot-store" value="武汉狮子座店" /></td><th>对照门店</th><td><input data-save="control-store" placeholder="填写相近门店；若无则说明" /></td></tr>
+      <tr><th>主成功指标</th><td><select data-save="primary-metric"><option>详情访问量相对提升</option><option>曝光量相对提升</option><option>支付订单相对提升</option><option>核销订单相对提升</option></select></td><th>目标</th><td><input data-save="primary-target" value="≥20%，且支付/核销与毛利不恶化" /></td></tr>
+      <tr><th>毛利底线</th><td><input data-save="margin-floor" placeholder="例如：套餐贡献毛利率 ≥25%" /></td><th>试点批准人</th><td><input data-save="pilot-approver" placeholder="填写姓名" /></td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section class="panel" id="security">
+    <h2>九、上线前 P0 安全与治理闸门</h2>
+    <div class="progress"><i id="progressBar"></i></div><p class="muted"><span id="progressText">0 / 0</span> 项完成。全部完成才允许接真实平台账号和顾客数据。</p>
+    <div class="checklist">
+      <label class="check"><input type="checkbox" data-check="network"/><span><b>仅内网 / VPN 可访问</b><small>未完成渗透测试和鉴权复审前不开放公网。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="auth"/><span><b>统一后端鉴权与 RBAC</b><small>每个 API 校验用户、租户、门店和动作权限；移除默认管理员/万能验证码。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="tenant"/><span><b>租户与门店隔离测试通过</b><small>跨 tenant_id / store_id 请求必须 403；数据库查询默认强制作用域。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="secret"/><span><b>凭据轮换并进入密钥管理器</b><small>仓库、前端、日志和数据库中不得存平台密钥明文。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="danger"/><span><b>危险能力关闭</b><small>Shell、任意文件读写/删除、无确认发送/审批/发布全部下线。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="privacy"/><span><b>顾客与员工数据最小化</b><small>手机号脱敏，任务中只用内部 ID；定义保留期、删除和访问审计。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="webhook"/><span><b>Webhook 验签和重放保护</b><small>签名、时间窗、nonce、幂等键、失败重试和死信队列。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="approval"/><span><b>审批策略不可绕过</b><small>价格、库存、赔付、外发、警告、奖惩使用服务端策略校验。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="audit"/><span><b>审计日志可追溯</b><small>记录查询、建议、审批、执行、失败、撤销；日志不可由普通管理员删除。</small></span></label>
+      <label class="check"><input type="checkbox" data-check="backup"/><span><b>备份与恢复演练完成</b><small>验证 RPO/RTO、回滚版本、连接器停机和紧急关停。</small></span></label>
+    </div>
+  </section>
+
+  <section class="panel" id="start">
+    <h2>十、现在就能开始的落地包</h2>
+    <div class="grid2">
+      <div class="card"><h3>已包含文件</h3><ul><li><code>agent.html</code>：店长/店员对话界面；</li><li><code>agent_server.py</code>：本地 Agent API 与会话服务；</li><li><code>store_agent.py</code>：角色权限和自然语言问答内核；</li><li><code>prototype.py</code>：确定性动作生成器；</li><li><code>schema.sql</code>：生产核心数据模型；</li><li><code>index.html</code>：完整落地方案与试点清单。</li></ul></div>
+      <div class="card"><h3>启动对话 Agent</h3><div class="codeblock">cd 门店运营系统\npython3 agent_server.py\n# 浏览器打开 http://127.0.0.1:8766/\n\npython3 -m unittest -v test_prototype.py test_store_agent.py</div><p class="muted small">可选配置 <code>STORE_AGENT_LLM_API_KEY</code>、<code>STORE_AGENT_LLM_BASE_URL</code> 和 <code>STORE_AGENT_LLM_MODEL</code> 启用开放式交流。当前不会连接真实平台，也不会执行改价、赔付、警告、奖惩或发布。</p></div>
+    </div>
+    <h3>立项人只需确认 6 件事</h3>
+    <div class="scroll"><table><tbody>
+      <tr><th>1. 试点门店</th><td><input data-save="decision-store" value="武汉狮子座店" /></td><th>2. 业务负责人</th><td><input data-save="decision-owner" placeholder="填写姓名" /></td></tr>
+      <tr><th>3. 美团/抖音账号负责人</th><td><input data-save="decision-platform-owner" placeholder="填写姓名" /></td><th>4. POS/PMS 厂商</th><td><input data-save="decision-pms" placeholder="填写厂商和联系人" /></td></tr>
+      <tr><th>5. 对照门店</th><td><input data-save="decision-control" placeholder="填写门店或说明没有" /></td><th>6. 预算/团队</th><td><input data-save="decision-team" placeholder="填写可投入人员和预算级别" /></td></tr>
+      <tr><th>立项意见</th><td colspan="3"><textarea data-save="decision-notes" placeholder="例如：批准进入第 0 周，只读 + dry-run；真实平台写操作继续逐次审批。"></textarea></td></tr>
+    </tbody></table></div>
+    <div class="callout success"><b>建议确认语：</b>“确认以武汉狮子座店启动门店运营系统第 0 周数据与安全准备，先使用官方导出跑只读/dry-run，不执行改价、赔付、消息、警告、奖惩或发布。”</div>
+  </section>
+
+  <section class="panel">
+    <h2>十一、明确不在首期做的功能</h2>
+    <div class="grid3">
+      <div class="card"><span class="tag stop">P2</span><h3>竞品价格自动监控</h3><p>先解决数据合法来源和商品匹配；首期用每周人工采样验证价值。</p></div>
+      <div class="card"><span class="tag stop">P2</span><h3>短视频种草 AI 运营</h3><p>先建立内容→到店/订单的可追踪链路，再做选题与自动化；发布始终另行确认。</p></div>
+      <div class="card"><span class="tag stop">禁止</span><h3>全自动奖惩</h3><p>劳动管理需要制度依据、人工复核和申诉。系统只提供事实和建议。</p></div>
+    </div>
+  </section>
+
+  <p class="footer">本文件所有填写项与清单只保存在当前浏览器 localStorage；不上传服务器。方案基于当前本地代码盘点，平台开放权限仍需用实际商家/开发者账号核验。</p>
+</main>
+<script>
+  const prefix='store-operations-system-v1:';
+  const savedEls=[...document.querySelectorAll('[data-save]')];
+  const checks=[...document.querySelectorAll('[data-check]')];
+  function load(){
+    savedEls.forEach(el=>{const v=localStorage.getItem(prefix+el.dataset.save);if(v!==null)el.value=v});
+    checks.forEach(el=>{el.checked=localStorage.getItem(prefix+'check:'+el.dataset.check)==='1'});
+    updateProgress();
+  }
+  function saveNow(){
+    savedEls.forEach(el=>localStorage.setItem(prefix+el.dataset.save,el.value));
+    checks.forEach(el=>localStorage.setItem(prefix+'check:'+el.dataset.check,el.checked?'1':'0'));
+    updateProgress();const btn=document.querySelector('.btn.primary');const old=btn.textContent;btn.textContent='已保存';setTimeout(()=>btn.textContent=old,1200);
+  }
+  function updateProgress(){
+    checks.forEach(el=>el.closest('.check').classList.toggle('done',el.checked));
+    const n=checks.filter(el=>el.checked).length;document.getElementById('progressText').textContent=`${n} / ${checks.length}`;document.getElementById('progressBar').style.width=(checks.length?n/checks.length*100:0)+'%';
+  }
+  savedEls.forEach(el=>el.addEventListener('change',saveNow));checks.forEach(el=>el.addEventListener('change',saveNow));load();
+</script>
+</body>
+</html>

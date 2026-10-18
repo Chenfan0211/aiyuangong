@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>经营看板｜武汉狮子座店</title>
+  <style>
+    :root{--bg:#eef2f7;--paper:#fff;--ink:#172033;--muted:#667085;--line:#dfe5ee;--blue:#3157d5;--green:#067647;--red:#b42318;--amber:#b54708;--shadow:0 18px 50px rgba(16,24,40,.1)}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    .wrap{width:min(1240px,calc(100% - 28px));margin:14px auto;background:var(--paper);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);overflow:hidden}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 22px;background:linear-gradient(135deg,#0b1429,#1b3a6b);color:#fff;flex-wrap:wrap}
+    header h1{font-size:18px;margin:0}header small{display:block;color:#a9c2e0;font-size:11px;letter-spacing:.12em}
+    .hbtns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    a.btn,button,select{border:0;border-radius:9px;padding:7px 11px;font:inherit;cursor:pointer}
+    a.btn{background:rgba(255,255,255,.14);color:#fff;text-decoration:none;font-size:12px}
+    select{background:#fff;color:#172033;font-size:12px}
+    main{padding:18px 22px 26px}
+    .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:6px}
+    .kpi{border:1px solid var(--line);border-radius:12px;padding:11px 12px;background:#fbfcfe}
+    .kpi .label{font-size:11px;color:var(--muted)}.kpi .value{font-size:20px;font-weight:700;margin:2px 0}
+    .up{color:var(--green);font-size:11px}.down{color:var(--red);font-size:11px}.flat{color:var(--muted);font-size:11px}
+    h2{font-size:15px;margin:20px 0 10px;display:flex;gap:8px;align-items:center}h2 span{font-size:12px;color:var(--muted);font-weight:400}
+    .grid2{display:grid;grid-template-columns:1.4fr 1fr;gap:16px}
+    .bars{display:flex;align-items:flex-end;gap:6px;height:150px;padding:8px;border:1px solid var(--line);border-radius:12px;background:#fbfcfe;overflow-x:auto}
+    .bar{flex:0 0 34px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px;height:100%}
+    .bar i{display:block;width:22px;background:linear-gradient(#6b8cff,#3157d5);border-radius:5px 5px 0 0;min-height:2px}
+    .bar b{font-size:10px;color:var(--muted);font-weight:500}
+    table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:8px 9px;border-bottom:1px solid var(--line)}
+    th{color:var(--muted);font-weight:600;background:#fbfcfe}.mono{font-family:ui-monospace,Consolas,monospace;font-size:11px}
+    .tag{display:inline-block;font-size:10px;padding:2px 7px;border-radius:999px;background:#eef2f7;color:#475467}
+    .tag.urgent,.tag.high{background:#fee4e2;color:#b42318}.tag.fresh,.tag.ok{background:#dcfae6;color:#05603a}
+    .tag.stale,.tag.pending{background:#fff1cc;color:#93370d}.tag.not_connected{background:#eef2f7;color:#667085}
+    ul.issues{margin:6px 0 0;padding-left:18px;font-size:12px}ul.issues li{margin:2px 0}
+    .report{margin-top:10px;border:1px solid var(--line);border-radius:12px;background:#fbfcfe;padding:12px;white-space:pre-wrap;font-size:12.5px;max-height:460px;overflow:auto}
+    .empty{color:var(--muted);font-size:12px;padding:8px 0}.notice{margin:10px 0;padding:10px 12px;border-radius:10px;background:#fff1cc;color:#93370d;font-size:12px}
+    @media(max-width:900px){.grid2{grid-template-columns:1fr}header{padding:12px 14px}main{padding:14px}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><small>OPERATIONS DASHBOARD</small><h1>经营看板</h1></div>
+    <div class="hbtns">
+      <select id="days"><option value="7">近 7 天</option><option value="14">近 14 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option></select>
+      <button class="btn" id="weekly">生成周报</button>
+      <button class="btn" id="monthly">生成月报</button>
+      <a class="btn" href="/governance">审批与审计</a>
+      <a class="btn" href="/agent.html">返回对话 →</a>
+    </div>
+  </header>
+  <main>
+    <div id="notice" class="notice" hidden></div>
+    <div id="kpis" class="kpis"><div class="empty">加载中…</div></div>
+
+    <div class="grid2">
+      <div>
+        <h2>每日曝光趋势 <span id="trendHint">柱高=当日曝光（跨平台合计）</span></h2>
+        <div class="bars" id="trend"><div class="empty">加载中…</div></div>
+        <h2>转化漏斗 <span id="funnelHint">曝光 → 详情访问 → 支付 → 核销</span></h2>
+        <table><tbody id="funnel"><tr><td class="empty">加载中…</td></tr></tbody></table>
+        <h2>套餐表现 <span>按支付订单排序，毛利率来自门店配置</span></h2>
+        <table><thead><tr><th>套餐</th><th>平台</th><th>访客</th><th>支付</th><th>转化率</th><th>毛利率</th></tr></thead>
+          <tbody id="packages"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table>
+      </div>
+      <div>
+        <h2>数据状态 <span>新鲜度与完整性</span></h2>
+        <table><tbody id="quality"><tr><td class="empty">加载中…</td></tr></tbody></table>
+        <h2>任务与审批 <span>近 7 天</span></h2>
+        <table><tbody id="tasks"><tr><td class="empty">加载中…</td></tr></tbody></table>
+        <h2>需要关注 <span>由数据质量与执行状态自动汇总</span></h2>
+        <ul class="issues" id="issues"><li class="empty">加载中…</li></ul>
+        <h2>报告输出 <span>周报 / 月报（可复制）</span></h2>
+        <div class="report" id="report">点击右上角「生成周报」或「生成月报」。</div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+  const token=localStorage.getItem('store-agent-token')||'';
+  const $=id=>document.getElementById(id);
+  const esc=v=>String(v??'');
+  const num=v=>v===null||v===undefined?'缺数':Number(v).toLocaleString('zh-CN');
+  const pct=v=>v===null||v===undefined?'缺数':v+'%';
+  function notice(text,isError){const el=$('notice');if(!text){el.hidden=true;return}el.hidden=false;el.textContent=text;el.style.background=isError?'#fee4e2':'#fff1cc';el.style.color=isError?'#b42318':'#93370d'}
+  async function api(path){const r=await fetch(path,{headers:token?{Authorization:'Bearer '+token}:{}});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.error||data.detail||('HTTP '+r.status));return data}
+  const cls=v=>v===null?'flat':(v>0?'up':(v<0?'down':'flat'));
+  const arrow=v=>v===null?'缺对比':(v>0?'▲ ':'▼ ')+v+'%';
+  const tag=s=>`<span class="tag ${esc(s)}">${esc(s)}</span>`;
+
+  function renderKpis(data){
+    const k=data.kpis,c=data.change_percent;
+    const cards=[
+      ['曝光',num(k.impressions),c.impressions],
+      ['详情访问',num(k.detail_views),c.detail_views],
+      ['支付订单',num(k.paid_orders),c.paid_orders],
+      ['核销订单',num(k.verified_orders),c.verified_orders],
+      ['访问率',pct(k.view_rate),null],['支付转化率',pct(k.pay_rate),null],
+      ['核销率',pct(k.verify_rate),null]
+    ];
+    if(data.financial_included){cards.splice(4,0,['GMV','¥'+num(k.gmv),c.gmv]);cards.push(['退款率',pct(k.refund_rate),null])}
+    $('kpis').innerHTML=cards.map(([label,value,chg])=>`<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div>`
+      +(chg===null||chg===undefined?'':`<div class="${cls(chg)}">${arrow(chg)}</div>`)+`</div>`).join('');
+  }
+  function renderTrend(data){
+    const rows=data.trend||[];
+    if(!rows.length){$('trend').innerHTML='<div class="empty">该区间没有数据。</div>';return}
+    const max=Math.max(...rows.map(r=>r.impressions||0))||1;
+    $('trend').innerHTML=rows.map(r=>`<div class="bar" title="${r.date}｜曝光 ${num(r.impressions)}｜支付 ${num(r.paid_orders)}">
+      <i style="height:${Math.max(2,Math.round((r.impressions||0)/max*100))}%"></i><b>${esc(r.date).slice(5)}</b></div>`).join('');
+  }
+  function renderFunnel(data){
+    const k=data.kpis;
+    const steps=[['曝光',k.impressions,'—'],['详情访问',k.detail_views,pct(k.view_rate)],['支付订单',k.paid_orders,pct(k.pay_rate)],['核销订单',k.verified_orders,pct(k.verify_rate)]];
+    $('funnel').innerHTML=steps.map(([label,value,rate])=>`<tr><th style="width:130px">${label}</th><td>${num(value)}</td><td class="mono">${rate}</td></tr>`).join('');
+  }
+  function renderPackages(data){
+    const rows=data.packages||[];
+    if(!rows.length){$('packages').innerHTML='<tr><td colspan="6" class="empty">该区间没有套餐明细（先导入套餐报表）。</td></tr>';return}
+    $('packages').innerHTML=rows.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.platform)}</td><td>${num(p.detail_views)}</td>
+      <td>${num(p.paid_orders)}</td><td>${pct(p.conversion_rate)}</td><td>${p.gross_margin_rate===null?'缺成本':(p.gross_margin_rate*100).toFixed(1)+'%'}</td></tr>`).join('');
+  }
+  function renderSide(data){
+    const q=data.data_quality;
+    $('quality').innerHTML=`<tr><th>窗口</th><td>${esc(data.window.start)} ~ ${esc(data.window.end)}</td></tr>
+      <tr><th>新鲜度</th><td>${Object.entries(q.freshness).map(([k,v])=>esc(k)+' '+tag(v)).join(' ')}</td></tr>
+      <tr><th>缺日</th><td>${q.missing_day_count} 天</td></tr><tr><th>跳变</th><td>${q.anomaly_count} 处</td></tr>`;
+    const t=data.tasks, a=data.approvals||{};
+    $('tasks').innerHTML=`<tr><th>任务</th><td>${t.total} 项（未关闭 ${t.open_count}／逾期 ${t.overdue_count}）</td></tr>
+      <tr><th>完成率</th><td>${pct(t.completion_rate)}</td></tr>
+      <tr><th>待审批</th><td>${a.pending||0} 张</td></tr>`;
+    $('issues').innerHTML=(data.issues||[]).length?data.issues.map(i=>`<li>${esc(i)}</li>`).join(''):'<li class="empty">未发现异常</li>';
+  }
+  async function load(){
+    try{
+      const data=await api('/api/dashboard?days='+encodeURIComponent($('days').value));
+      renderKpis(data);renderTrend(data);renderFunnel(data);renderPackages(data);renderSide(data);
+      notice(data.has_data?'':'该区间没有已校验的平台数据：请先导出并导入官方报表。',!data.has_data);
+    }catch(error){notice('看板加载失败：'+error.message,true);$('kpis').innerHTML='<div class="empty">加载失败</div>'}
+  }
+  async function report(kind){
+    try{const data=await api('/api/reports/'+kind);$('report').textContent=data.report;notice('已生成'+data.title,false)}
+    catch(error){notice('生成失败：'+error.message,true)}
+  }
+  $('days').onchange=load;$('weekly').onclick=()=>report('weekly');$('monthly').onclick=()=>report('monthly');
+  if(!token){notice('未登录：请先在对话页面登录，再回到本页。',true)}else{notice('');load()}
+</script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+{
+  "tenant_id": "LPL-001",
+  "store_id": "WH-LION-001",
+  "name": "武汉狮子座店",
+  "timezone": "Asia/Shanghai",
+  "people": {
+    "store_manager": "武汉狮子座店店长",
+    "review_operator": "员工小李",
+    "online_operator": "线上运营",
+    "area_manager": "区域负责人"
+  },
+  "review_cycle": {
+    "cycle_start": "2026-09-01",
+    "cycle_end": "2026-09-30",
+    "target_qualified_month": 40,
+    "daily_invite_cap": null
+  },
+  "package_costs": [
+    {
+      "platform": "meituan",
+      "package_id": "MT-1632214010",
+      "sale_price": 198,
+      "variable_cost": 137
+    }
+  ],
+  "rules": {
+    "negative_review_sla_hours": 4,
+    "package_conversion_floor": 0.05,
+    "package_min_views": 50,
+    "package_margin_floor": 0.25,
+    "fresh_days": 2,
+    "jump_alert_percent": 30
+  },
+  "retention": {
+    "platform_metrics": 1095,
+    "package_metrics": 1095,
+    "metric_import_batches": 1095,
+    "reviews": 180,
+    "action_tasks": 730,
+    "task_evidence": 730,
+    "task_events": 730,
+    "approvals": 730,
+    "audit_events": 730,
+    "agent_messages": 90,
+    "agent_sessions": 90,
+    "agent_tool_runs": 180,
+    "notifications": 180,
+    "auth_sessions": 30,
+    "login_attempts": 30,
+    "webhook_nonces": 1,
+    "users": 0,
+    "memberships": 0,
+    "stores": 0,
+    "store_configs": 0
+  }
+}

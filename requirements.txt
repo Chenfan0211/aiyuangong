@@ -1,0 +1,21 @@
+# 门店运营系统依赖清单
+#
+# === 一期：零第三方依赖 ===
+# agent_server.py（标准库 HTTP）、platform_sync.py、store_cli.py、snapshot_builder.py
+# 只依赖 Python 标准库（sqlite3 / http.server / csv / unittest / urllib / hashlib），
+# 因此一期可以在没有网络的机器上直接跑。Python 要求 3.10+。
+#
+# === 二期批次 8：FastAPI 传输层 + PostgreSQL 落地 ===
+# 以下为实际验证过的版本（2026-10-18，Python 3.12.10 / Windows）：
+fastapi>=0.141        # 0.141.1
+uvicorn>=0.52         # 0.52.4
+pydantic>=2.13        # 2.13.5
+psycopg[binary]>=3.3  # 3.3.6（PostgreSQL 驱动）
+#
+# === 开发与测试（生产环境不需要） ===
+httpx>=0.28           # 0.28.1，FastAPI TestClient
+pgserver>=0.1         # 0.1.4，本地拉起 PostgreSQL 16 跑迁移测试（内置二进制）
+#
+# 安装：
+#   python -m pip install -r requirements.txt          # 全部（含测试）
+#   python -m pip install fastapi uvicorn pydantic      # 只跑 FastAPI 入口

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 运行时数据库与日志（不得入库）
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/logs/
+
+# 人工导入的原始报表（保留目录占位文件）
+imports/inbox/*
+!imports/inbox/.gitkeep
+
+# 本地环境变量（只提交 config/env.example）
+.env
+config/.env
+
+# 编辑器 / 操作系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

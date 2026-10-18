@@ -1,0 +1,49 @@
+{
+  "store": {
+    "tenant_id": "LPL-001",
+    "store_id": "WH-LION-001",
+    "name": "武汉狮子座店"
+  },
+  "date": "2026-09-03",
+  "store_manager": "武汉狮子座店店长",
+  "review_operator": "员工小李",
+  "online_operator": "线上运营",
+  "area_manager": "区域负责人",
+  "reviews": {
+    "completed_orders_yesterday": 42,
+    "eligible_review_invites_today": 12,
+    "qualified_reviews_month": 18,
+    "qualified_review_target_month": 40,
+    "days_remaining_in_cycle": 11,
+    "open_negative_reviews": [
+      {
+        "review_id": "MT-REVIEW-1024",
+        "age_hours": 6,
+        "assignee": "武汉狮子座店店长",
+        "compensation_requested": true
+      }
+    ]
+  },
+  "packages": [
+    {
+      "package_id": "MT-1632214010",
+      "name": "AI全周小包2h",
+      "detail_views_7d": 168,
+      "paid_orders_7d": 5,
+      "gross_margin_rate": 0.31
+    }
+  ],
+  "overdue_staff_tasks": [
+    {
+      "task_id": "TASK-889",
+      "employee_id": "EMP-017",
+      "missed_count": 2
+    }
+  ],
+  "rules": {
+    "negative_review_sla_hours": 4,
+    "package_conversion_floor": 0.05,
+    "package_min_views": 50,
+    "package_margin_floor": 0.25
+  }
+}
