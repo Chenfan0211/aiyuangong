@@ -374,19 +374,23 @@ def main() -> None:
         elif args.command in ("backup", "restore", "drill", "gate-check"):
             if args.command == "backup":
                 out = args.out or Path(args.store_db).parent / "backup" / f"backup-{datetime.now():%Y%m%d-%H%M%S}.json"
-                payload = create_backup(args.store_db, out, compress=not args.plain)
+                payload = create_backup(args.store_db, out, compress=not args.plain,
+                                        tenant_id=tenant_id, store_id=store_id)
                 payload["verified"] = verify_backup(Path(payload["path"]))["ok"]
             elif args.command == "restore":
-                payload = restore_backup(args.target or args.store_db, args.input, force=args.force)
+                payload = restore_backup(args.target or args.store_db, args.input, force=args.force,
+                                         tenant_id=tenant_id, store_id=store_id)
             elif args.command == "drill":
-                payload = drill(args.store_db, args.workdir or Path(args.store_db).parent / "drill")
+                payload = drill(args.store_db, args.workdir or Path(args.store_db).parent / "drill",
+                            tenant_id=tenant_id, store_id=store_id)
             else:
                 payload = gate_report(Path(__file__).resolve().parent, dsn=args.dsn)
         elif args.command in ("retention-plan", "purge"):
             policy = policy_from_config(config)
             moment = datetime.fromisoformat(args.now) if args.now else None
             if args.command == "retention-plan":
-                plans = plan_purge(args.store_db, policy, now=moment)
+                plans = plan_purge(args.store_db, policy, now=moment,
+                                      tenant_id=tenant_id, store_id=store_id)
                 payload = {"store_id": store_id, "policy_days": policy,
                            "planned_total": sum(plan.rows for plan in plans),
                            "tables": [plan.as_dict() for plan in plans]}

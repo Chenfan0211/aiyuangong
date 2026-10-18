@@ -165,6 +165,33 @@ class PurgeTests(Base):
             self.assertEqual(int(conn.execute("select count(*) as c from users").fetchone()["c"]), 1)
             self.assertEqual(int(conn.execute("select count(*) as c from memberships").fetchone()["c"]), 1)
 
+    def test_purge_is_store_scoped(self):
+        self.auth.record_audit(event_type="old_store", actor_type="user", actor_id="u1",
+                               tenant_id=TENANT, store_id=STORE, object_type="x", object_id="1")
+        self.auth.record_audit(event_type="old_other", actor_type="user", actor_id="u2",
+                               tenant_id=TENANT, store_id="OTHER-STORE", object_type="x", object_id="2")
+        from db import Database
+        with Database(self.ops_db).connection() as conn:
+            conn.execute("update audit_events set created_at='2000-01-01T00:00:00'")
+        result = purge(self.ops_db, dict(self.policy, audit_events=30), apply=True, now=NOW,
+                       tenant_id=TENANT, store_id=STORE)
+        self.assertEqual(result["deleted"].get("audit_events"), 1)  # 只删除本店旧事件；清理审计在删除后写入
+        with Database(self.ops_db).connection() as conn:
+            remaining = [row["event_type"] for row in conn.execute("select event_type from audit_events").fetchall()]
+        self.assertIn("old_other", remaining)
+        self.assertNotIn("old_store", remaining)
+
+    def test_archive_write_failure_keeps_rows(self):
+        self.seed_message(200)
+        blocked = self.root / "not-a-directory"
+        blocked.write_text("x", encoding="utf-8")
+        with self.assertRaises(OSError):
+            purge(self.ops_db, self.policy, apply=True, export_dir=blocked, now=NOW,
+                  tenant_id=TENANT, store_id=STORE)
+        from db import Database
+        with Database(self.ops_db).connection() as conn:
+            self.assertEqual(int(conn.execute("select count(*) as c from agent_messages").fetchone()["c"]), 1)
+
     def test_export_archive_contains_deleted_rows(self):
         self.seed_message(200)
         export_dir = self.root / "archive"

@@ -64,7 +64,7 @@ def _table_columns(db: Database, conn: Any, table: str) -> list[str]:
     return [row["name"] for row in rows if row["name"] not in SKIP_COLUMNS]
 
 
-def ensure_schema(db_target: Any) -> list[str]:
+def ensure_schema(db_target: Any, tenant_id: str = "") -> list[str]:
     """确保目标库的运行时表结构存在（SQLite 由各 store 内联 DDL 建立，PostgreSQL 走 schema.sql）。
 
     恢复到**全新库**时必须先建表；复用各 store 的初始化逻辑，避免在这里维护第二份 DDL。
@@ -80,13 +80,14 @@ def ensure_schema(db_target: Any) -> list[str]:
     initializers = (PlatformMetricStore, TaskStore, AuthStore, ApprovalStore, ToolRunLog,
                     RegistryStore, NotificationLedger, AgentSessionStore)
     for factory in initializers:
-        factory(db_target)
-    return Database(db_target).landed_tables()
+        factory(db_target, tenant_id=tenant_id)
+    return Database(db_target, tenant_id=tenant_id).landed_tables()
 
 
-def create_backup(db_target: Any, out_path: Path, compress: bool = True) -> dict[str, Any]:
+def create_backup(db_target: Any, out_path: Path, compress: bool = True, *, tenant_id: str = "",
+                  store_id: str = "") -> dict[str, Any]:
     """把全部已落地表写进一个 JSON（或 .json.gz）备份文件。"""
-    db = Database(db_target)
+    db = Database(db_target, tenant_id=tenant_id)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tables: dict[str, Any] = {}
@@ -108,6 +109,8 @@ def create_backup(db_target: Any, out_path: Path, compress: bool = True) -> dict
         "target": db.target if db.dialect == "sqlite" else db.target.split("@")[-1],
         "table_count": len(tables),
         "row_total": sum(item["row_count"] for item in tables.values()),
+        "tenant_id": tenant_id,
+        "store_id": store_id,
     }
     payload = {"manifest": manifest, "tables": tables}
     raw = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -154,11 +157,15 @@ def verify_backup(path: Path) -> dict[str, Any]:
             "tables": {table: item["row_count"] for table, item in payload["tables"].items()}}
 
 
-def restore_backup(db_target: Any, path: Path, force: bool = False) -> dict[str, Any]:
+def restore_backup(db_target: Any, path: Path, force: bool = False, *, tenant_id: str = "",
+                   store_id: str = "") -> dict[str, Any]:
     """把备份恢复进目标库；默认拒绝覆盖非空库。"""
+    verification = verify_backup(path)
+    if not verification["ok"]:
+        raise BackupError("备份校验失败，拒绝恢复：" + "；".join(verification["problems"]))
     payload = load_backup(path)
-    ensure_schema(db_target)                      # 全新库也要先有表结构
-    db = Database(db_target)
+    ensure_schema(db_target, tenant_id=tenant_id)  # 全新库也要先有表结构
+    db = Database(db_target, tenant_id=tenant_id)
     restored: dict[str, int] = {}
     skipped: list[str] = []
     with db.connection() as conn:
@@ -196,13 +203,14 @@ def restore_backup(db_target: Any, path: Path, force: bool = False) -> dict[str,
             "row_total": sum(restored.values()), "source_manifest": payload["manifest"]}
 
 
-def drill(source_target: Any, workdir: Path, target_filename: str = "drill_restore.db") -> dict[str, Any]:
+def drill(source_target: Any, workdir: Path, target_filename: str = "drill_restore.db", *,
+          tenant_id: str = "", store_id: str = "") -> dict[str, Any]:
     """恢复演练：备份 → 恢复到全新库 → 逐表比对行数与内容哈希。"""
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = workdir / f"backup-{stamp}.json.gz"
-    manifest = create_backup(source_target, backup_path)
+    manifest = create_backup(source_target, backup_path, tenant_id=tenant_id, store_id=store_id)
     verification = verify_backup(backup_path)
     if not verification["ok"]:
         return {"ok": False, "stage": "verify", "problems": verification["problems"],
@@ -223,7 +231,7 @@ def drill(source_target: Any, workdir: Path, target_filename: str = "drill_resto
         restore_target = _swap_database(source_target, drill_db)
         cleanup.append(drill_db)
     try:
-        restore = restore_backup(restore_target, backup_path, force=True)
+        restore = restore_backup(restore_target, backup_path, force=True, tenant_id=tenant_id, store_id=store_id)
     except Exception:
         if cleanup:
             _drop_database(source_target, cleanup[0])

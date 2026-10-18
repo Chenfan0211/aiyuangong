@@ -145,14 +145,29 @@ def _columns(db: Database, conn: Any, table: str) -> list[str]:
     return [row["name"] for row in rows]
 
 
+
+
+def _scope_where(db: Database, conn: Any, table: str, tenant_id: str, store_id: str) -> tuple[str, list[Any]]:
+    columns = db.table_columns(conn, table)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if tenant_id and "tenant_id" in columns:
+        clauses.append("tenant_id = ?")
+        params.append(tenant_id)
+    if store_id and "store_id" in columns:
+        clauses.append("store_id = ?")
+        params.append(store_id)
+    return ((" and " + " and ".join(clauses)) if clauses else "", params)
+
 def _cutoff(days: int, now: datetime) -> str:
     return (now - timedelta(days=days)).date().isoformat()
 
 
-def plan_purge(db_target: Any, policy: dict[str, int], now: Optional[datetime] = None) -> list[TablePlan]:
+def plan_purge(db_target: Any, policy: dict[str, int], now: Optional[datetime] = None, *,
+               tenant_id: str = "", store_id: str = "") -> list[TablePlan]:
     """只统计不删除：每张表将要删掉多少行、按哪一列、截止到哪天。"""
     moment = now or datetime.now()
-    db = Database(db_target)
+    db = Database(db_target, tenant_id=tenant_id)
     plans: list[TablePlan] = []
     with db.connection() as conn:
         existing = _existing_tables(db, conn)
@@ -168,8 +183,10 @@ def plan_purge(db_target: Any, policy: dict[str, int], now: Optional[datetime] =
                 plans.append(TablePlan(table, days, column, None, 0, "skip"))
                 continue
             bound = _cutoff(days, moment)
+            scope, scope_params = _scope_where(db, conn, table, tenant_id, store_id)
             count = int(conn.execute(
-                f"select count(*) as c from {table} where {column} < ?", (bound,)).fetchone()["c"])
+                f"select count(*) as c from {table} where {column} < ?{scope}",
+                tuple([bound] + scope_params)).fetchone()["c"])
             plans.append(TablePlan(table, days, column, bound, count, "purge" if count else "keep"))
     return plans
 
@@ -186,7 +203,7 @@ def purge(
     store_id: str = "",
 ) -> dict[str, Any]:
     """执行（或仅计划）清理。`apply=False` 时只返回计划，绝不删除。"""
-    plans = plan_purge(db_target, policy, now=now)
+    plans = plan_purge(db_target, policy, now=now, tenant_id=tenant_id, store_id=store_id)
     result: dict[str, Any] = {
         "apply": apply, "planned": [plan.as_dict() for plan in plans],
         "deleted": {}, "exported": None, "total_deleted": 0,
@@ -195,32 +212,46 @@ def purge(
     if not apply:
         return result
 
-    db = Database(db_target)
+    db = Database(db_target, tenant_id=tenant_id)
     archive_rows: dict[str, dict[str, Any]] = {}
     deleted: dict[str, int] = {}
+    if export_dir is None:
+        export_dir = Path("data") / "retention_archive"
     with db.connection() as conn:
         for plan in plans:
             if plan.action != "purge" or not plan.date_column or not plan.cutoff:
                 continue
-            if export_dir is not None:
-                columns = _columns(db, conn, plan.table)
-                rows = [dict(row) for row in conn.execute(
-                    f"select {', '.join(columns)} from {plan.table} "
-                    f"where {plan.date_column} < ?", (plan.cutoff,)).fetchall()]
+            columns = _columns(db, conn, plan.table)
+            scope, scope_params = _scope_where(db, conn, plan.table, tenant_id, store_id)
+            rows = [dict(row) for row in conn.execute(
+                f"select {', '.join(columns)} from {plan.table} "
+                f"where {plan.date_column} < ?{scope}",
+                tuple([plan.cutoff] + scope_params)).fetchall()]
+            if rows:
                 archive_rows[plan.table] = {"columns": columns, "cutoff": plan.cutoff, "rows": rows}
-            cursor = conn.execute(
-                f"delete from {plan.table} where {plan.date_column} < ?", (plan.cutoff,))
-            deleted[plan.table] = int(cursor.rowcount or 0)
 
-    if export_dir is not None and archive_rows:
-        export_dir = Path(export_dir)
-        export_dir.mkdir(parents=True, exist_ok=True)
-        stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-        path = export_dir / f"purged-{stamp}.json.gz"
-        payload = {"kind": "retention_archive", "created_at": datetime.now().isoformat(timespec="seconds"),
-                   "actor": actor, "tables": archive_rows}
-        path.write_bytes(gzip.compress(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")))
-        result["exported"] = {"path": str(path), "tables": {k: len(v["rows"]) for k, v in archive_rows.items()}}
+        if archive_rows:
+            export_dir = Path(export_dir)
+            export_dir.mkdir(parents=True, exist_ok=True)
+            stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+            path = export_dir / f"purged-{stamp}.json.gz"
+            payload = {"kind": "retention_archive", "created_at": datetime.now().isoformat(timespec="seconds"),
+                       "actor": actor, "tables": archive_rows}
+            path.write_bytes(gzip.compress(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")))
+            summary = archive_summary(path)
+            for table, item in archive_rows.items():
+                if summary["tables"][table]["rows"] != len(item["rows"]):
+                    raise RetentionError(f"归档校验失败：{table}")
+            result["exported"] = {"path": str(path), "tables": {k: len(v["rows"]) for k, v in archive_rows.items()}}
+
+        for plan in plans:
+            if plan.action != "purge" or not plan.date_column or not plan.cutoff:
+                continue
+            scope, scope_params = _scope_where(db, conn, plan.table, tenant_id, store_id)
+            cursor = conn.execute(
+                f"delete from {plan.table} where {plan.date_column} < ?{scope}",
+                tuple([plan.cutoff] + scope_params))
+            deleted[plan.table] = int(cursor.rowcount or 0)
 
     result["deleted"] = deleted
     result["total_deleted"] = sum(deleted.values())

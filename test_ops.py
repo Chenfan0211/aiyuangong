@@ -65,7 +65,7 @@ class BackupTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_backup_manifest_and_verify(self):
-        manifest = create_backup(self.db, self.root / "b.json.gz")
+        manifest = create_backup(self.db, self.root / "b.json.gz", tenant_id=TENANT, store_id=STORE)
         self.assertGreaterEqual(manifest["table_count"], 5)
         self.assertGreater(manifest["row_total"], 0)
         self.assertTrue(Path(manifest["path"]).exists())
@@ -74,7 +74,7 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(result["tables"]["action_tasks"], 1)
         self.assertIn("platform_metrics", result["tables"])
         # 明文备份也要能读
-        plain = create_backup(self.db, self.root / "b.json", compress=False)
+        plain = create_backup(self.db, self.root / "b.json", compress=False, tenant_id=TENANT, store_id=STORE)
         self.assertTrue(verify_backup(Path(plain["path"]))["ok"])
 
     def test_tampered_backup_is_detected(self):
@@ -97,6 +97,15 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(any("行数与数据不符" in problem or "哈希不匹配" in problem
                             for problem in result["problems"]))
 
+
+    def test_restore_rejects_tampered_backup_before_writing(self):
+        path = self.root / "tampered.json"
+        create_backup(self.db, path, compress=False, tenant_id=TENANT, store_id=STORE)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["tables"]["action_tasks"]["rows"][0]["title"] = "tampered"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        with self.assertRaises(BackupError):
+            restore_backup(self.root / "target.db", path, force=True, tenant_id=TENANT, store_id=STORE)
     def test_restore_into_fresh_database(self):
         manifest = create_backup(self.db, self.root / "b.json.gz")
         target = self.root / "restored.db"
@@ -156,7 +165,7 @@ class PgBackupTests(unittest.TestCase):
         seed(self.dsn, self.tmp, tenant=TENANT, store=STORE)
 
     def test_drill_on_postgres_uses_fresh_database(self):
-        report = drill(self.dsn, self.tmp / "drill")
+        report = drill(self.dsn, self.tmp / "drill", tenant_id=TENANT, store_id=STORE)
         self.assertTrue(report["ok"], report.get("mismatches"))
         self.assertGreaterEqual(report["checked_tables"], 5)
         # 演练用的临时数据库必须被清理掉，且源库数据不受影响
@@ -169,10 +178,10 @@ class PgBackupTests(unittest.TestCase):
     def test_restore_then_insert_does_not_collide(self):
         from ops_backup import create_backup as backup
         backup_path = self.tmp / "pg.json.gz"
-        backup(self.dsn, backup_path)
+        backup(self.dsn, backup_path, tenant_id=TENANT, store_id=STORE)
         with psycopg.connect(self.dsn) as conn, conn.cursor() as cur:
             cur.execute("drop schema public cascade; create schema public")
-        result = restore_backup(self.dsn, backup_path, force=True)
+        result = restore_backup(self.dsn, backup_path, force=True, tenant_id=TENANT, store_id=STORE)
         self.assertGreater(result["row_total"], 0)
         auth = AuthStore(self.dsn, tenant_id=TENANT)
         auth.record_audit(event_type="after_restore", actor_type="user", actor_id="manager01",
