@@ -90,6 +90,7 @@ class ReportingApiBase:
             self.thread.start()
 
         self.tokens = {name: self.login(name) for name in ("manager01", "staff01")}
+        self.client.cookies.clear()
 
     def tearDown(self):
         if self.transport == "fastapi":

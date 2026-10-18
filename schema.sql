@@ -387,6 +387,10 @@ alter table user_mfa enable row level security;
 drop policy if exists p_user_mfa_tenant on user_mfa;
 create policy p_user_mfa_tenant on user_mfa using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
 
+alter table mfa_challenges enable row level security;
+drop policy if exists p_mfa_challenges_tenant on mfa_challenges;
+create policy p_mfa_challenges_tenant on mfa_challenges using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
+
 alter table auth_sessions enable row level security;
 drop policy if exists p_auth_sessions_tenant on auth_sessions;
 create policy p_auth_sessions_tenant on auth_sessions using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));

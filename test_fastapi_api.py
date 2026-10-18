@@ -69,6 +69,7 @@ class FastApiTests(unittest.TestCase):
                               store_db=root / "ops.db", chat_db=root / "chat.db", auth_mode="session")
         self.client = TestClient(self.app)
         self.tokens = {name: self.login(name) for name in ("owner01", "manager01", "staff01")}
+        self.client.cookies.clear()
 
     def tearDown(self):
         self.client.close()

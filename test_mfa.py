@@ -3,12 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from auth import AuthStore, totp_code, verify_totp
+from auth import AuthStore, generate_totp_secret, totp_code, verify_totp
 
 
 class TotpTests(unittest.TestCase):
     def test_totp_round_trip_and_window(self):
-        secret = "JBSWY3DPEHPK3PXP"
+        secret = generate_totp_secret()
         code = totp_code(secret, timestamp=1_700_000_000)
         self.assertEqual(len(code), 6)
         self.assertTrue(verify_totp(secret, code, timestamp=1_700_000_000))
