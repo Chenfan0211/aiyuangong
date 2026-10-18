@@ -15,6 +15,27 @@
 --   * 所有 DDL 幂等（create ... if not exists），可由 pg_sync.py 重复执行。
 
 -- ============================================================
+-- A0. 迁移记录
+-- ============================================================
+-- 由 pg_sync.py migrate 维护：版本账本 + 持锁记录（数据库 advisory lock 的可见副本）。
+-- init 同样创建这两张表，但只有 `migrate --apply` 才写入版本行；这两张表不带 tenant_id，
+-- 属于迁移基础设施而非门店业务数据，不参与 RLS。
+create table if not exists schema_migrations (
+  version integer primary key,
+  name text not null,
+  checksum text not null,
+  applied_at timestamptz not null default now(),
+  adopted boolean not null default false,
+  applied_by text not null default current_user
+);
+
+create table if not exists schema_migration_lock (
+  lock_key bigint primary key,
+  locked_by text not null,
+  locked_at timestamptz not null default now(),
+  released_at timestamptz
+);
+-- ============================================================
 -- A. 已落地
 -- ============================================================
 
