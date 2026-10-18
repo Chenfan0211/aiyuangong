@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_tools import PermissionDenied, StoreTools
@@ -141,6 +142,22 @@ def create_app(
         openapi_url=None if production else "/openapi.json",
     )
     app.state.ctx = ctx
+
+    app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        csp = ("default-src 'self'; script-src 'self'; style-src 'self'; "
+               "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+               "base-uri 'none'; frame-ancestors 'none'")
+        response.headers["Content-Security-Policy"] = csp
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if _is_production():
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
 
     # ---------------- 依赖 ----------------
 

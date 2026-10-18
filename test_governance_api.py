@@ -226,8 +226,10 @@ class GovernanceApiBase:
     def test_governance_page_is_served(self):
         status, html = self._request("GET", "/governance")
         self.assertEqual(status, 200)
-        for marker in ('id="queue"', 'id="auditBody"', 'id="toolBody"', "/api/approvals"):
+        for marker in ('id="queue"', 'id="auditBody"', 'id="toolBody"'):
             self.assertIn(marker, html)
+        script = (Path(__file__).resolve().parent / "static" / "governance.js").read_text(encoding="utf-8")
+        self.assertIn("/api/approvals", script)
 
 
 class GovernanceApiStdlibTests(GovernanceApiBase, unittest.TestCase):

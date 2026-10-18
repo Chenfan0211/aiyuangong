@@ -77,7 +77,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
 
     def _json(self, status: int, payload: dict) -> None:
@@ -391,6 +391,15 @@ class AgentHandler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "会话不合法"})
                 return
             self._json(200, {"messages": self.sessions.history(session_id, context.user_id)})
+            return
+
+        if parsed.path.startswith("/static/"):
+            candidate = (ROOT / "static" / parsed.path[len("/static/"):]).resolve()
+            static_root = (ROOT / "static").resolve()
+            if static_root != candidate and static_root in candidate.parents and candidate.is_file():
+                self._static(candidate)
+            else:
+                self._json(404, {"error": "not found"})
             return
 
         if parsed.path in ("/", "/agent.html"):
