@@ -78,7 +78,7 @@
 <script>
   const token=localStorage.getItem('store-agent-token')||'';
   const $=id=>document.getElementById(id);
-  const esc=v=>String(v??'');
+  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const num=v=>v===null||v===undefined?'缺数':Number(v).toLocaleString('zh-CN');
   const pct=v=>v===null||v===undefined?'缺数':v+'%';
   function notice(text,isError){const el=$('notice');if(!text){el.hidden=true;return}el.hidden=false;el.textContent=text;el.style.background=isError?'#fee4e2':'#fff1cc';el.style.color=isError?'#b42318':'#93370d'}

@@ -62,7 +62,7 @@
 <script>
   const token=localStorage.getItem('store-agent-token')||'';
   const $=id=>document.getElementById(id);
-  const esc=v=>String(v??'');
+  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   function notice(text,isError){const el=$('notice');if(!text){el.hidden=true;return}el.hidden=false;el.textContent=text;el.style.background=isError?'#fee4e2':'#fff1cc';el.style.color=isError?'#b42318':'#93370d'}
   async function api(path,options){const opts=options||{};opts.headers=opts.headers||{};if(token)opts.headers['Authorization']='Bearer '+token;const r=await fetch(path,opts);const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.error||data.detail||('HTTP '+r.status));return data}
   async function post(path,body){return api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
