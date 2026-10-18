@@ -43,7 +43,7 @@ export function totp(secret, now = Date.now()) {
 export async function login(page, user) {
   await page.goto('/agent.html');
   await page.getByLabel('门店账号').fill(user.username);
-  await page.getByLabel('口令').fill(user.password);
+  await page.getByLabel('口令', { exact: true }).fill(user.password);
   const meReady = page.waitForResponse(
     (response) => response.url().includes('/api/auth/me') && response.status() === 200,
     { timeout: 15_000 }

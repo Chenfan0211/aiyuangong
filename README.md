@@ -5,7 +5,7 @@
 - 门店：武汉狮子座店（`store_id = WH-LION-001`）
 - 形态：单店生产化加固版本，支持 FastAPI + PostgreSQL、云主机 HTTPS、管理岗 TOTP、图片证据和 owner 管理后台
 - 技术栈：Python 3.12 + FastAPI + PostgreSQL 16 + Docker Compose + Caddy
-- 当前验证基线：**384 个 Python 用例 + 12 个 Playwright 浏览器用例全部通过**
+- 当前验证基线：**418 个 Python 用例 + 22 个 Playwright 浏览器用例全部通过**
 - 生产化落地状态与未闭环边界见 `PRODUCTION_READINESS.md`
 
 ---
@@ -71,7 +71,7 @@ python -m unittest discover -p "test_*.py"     # Windows
 python3 -m unittest discover -p "test_*.py"    # macOS / Linux
 ```
 
-当前基线：**384 个 Python 用例 + 12 个 Playwright 浏览器用例全部通过**（含 FastAPI、PostgreSQL 迁移/等价性/RLS、两套传输层的治理与看板接口、推送与大模型工具调用均用本地桩实测 HTTP）。
+当前基线：**418 个 Python 用例 + 22 个 Playwright 浏览器用例全部通过**（含 FastAPI、PostgreSQL 迁移/等价性/RLS、两套传输层的治理与看板接口、推送与大模型工具调用均用本地桩实测 HTTP）。
 
 ---
 

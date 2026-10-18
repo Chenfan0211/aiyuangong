@@ -11,11 +11,19 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
+import os
 import re
+import struct
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
+
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from db import Database
 from governance import ApprovalStore, apply_decision
@@ -166,6 +174,60 @@ def _fingerprint(provider: str, approval_id: str, decision: str, actor: str, rea
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _base64_decode(value: Any, field: str) -> bytes:
+    try:
+        return base64.b64decode(str(value), validate=True)
+    except (TypeError, ValueError) as exc:
+        raise ApprovalCallbackError("decryption_failed", f"{field} 不是合法 Base64") from exc
+
+
+def _decode_aes_cbc(ciphertext: bytes, key: bytes, iv: bytes, block_size: int = 128) -> bytes:
+    try:
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        unpadder = padding.PKCS7(block_size).unpadder()
+        return unpadder.update(padded) + unpadder.finalize()
+    except Exception as exc:                                   # noqa: BLE001 - 统一映射为协议解密失败
+        raise ApprovalCallbackError("decryption_failed", "回调内容解密失败") from exc
+
+
+def _xml_root(raw: bytes) -> ET.Element:
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise ApprovalCallbackError("invalid_payload", f"回调体不是合法 XML：{exc}") from exc
+    if str(root.tag).lower() != "xml":
+        raise ApprovalCallbackError("invalid_payload", "回调 XML 根节点必须是 xml")
+    return root
+
+
+def _xml_encrypted(root: ET.Element) -> str:
+    for child in root:
+        if str(child.tag).lower() == "encrypt" and str(child.text or "").strip():
+            return str(child.text).strip()
+    raise ApprovalCallbackError("missing_encrypt", "企微 XML 缺少 Encrypt 字段")
+
+
+def _xml_object(raw: bytes) -> dict[str, Any]:
+    root = _xml_root(raw)
+    values = {str(child.tag): str(child.text or "").strip() for child in root}
+    event_key = next(
+        (value for key, value in values.items() if key.lower() == "eventkey"), ""
+    )
+    if event_key.startswith("{") and event_key.endswith("}"):
+        try:
+            nested = json.loads(event_key)
+        except json.JSONDecodeError as exc:
+            raise ApprovalCallbackError("invalid_payload", "EventKey 不是合法 JSON") from exc
+        if isinstance(nested, dict):
+            values.update(nested)
+    return values
+
+
+def _within_tolerance(timestamp: int, now: int, tolerance: int) -> bool:
+    return abs(now - timestamp) <= tolerance
+
+
 class ApprovalCallbackAdapter:
     """统一的审批回调入口；provider 只影响字段解析和头名别名。"""
 
@@ -224,15 +286,21 @@ class ApprovalCallbackAdapter:
 
         approval_id = (_get_ci(value, "approval_id", "approvalId", "id")
                        or _get_ci(payload, "approval_id", "approvalId", "id"))
-        decision = (_get_ci(value, "decision", "action", "result")
-                    or _get_ci(payload, "decision", "action", "result"))
+        decision = (_get_ci(value, "decision", "action", "result", "approval_action",
+                            "approvalAction", "approval_result", "approvalResult")
+                    or _get_ci(payload, "decision", "action", "result", "approval_action",
+                               "approvalAction", "approval_result", "approvalResult"))
         actor = (_get_ci(value, "decided_by", "decidedBy", "operator_id", "operatorId",
-                         "user_id", "userId", "open_id", "openId")
+                         "user_id", "userId", "open_id", "openId", "from_user_name",
+                         "fromUserName", "from_user_id", "fromUserId", "from_user",
+                         "fromUser")
                  or _get_ci(operator, "open_id", "openId", "user_id", "userId", "id")
                  or _get_ci(payload, "decided_by", "decidedBy", "operator_id", "operatorId",
-                            "user_id", "userId", "open_id", "openId"))
-        reason = (_get_ci(value, "reason", "comment", "note", "message")
-                  or _get_ci(payload, "reason", "comment", "note", "message") or "")
+                            "user_id", "userId", "open_id", "openId", "from_user_name",
+                            "fromUserName", "from_user_id", "fromUserId", "from_user",
+                            "fromUser"))
+        reason = (_get_ci(value, "reason", "comment", "note", "message", "remark")
+                  or _get_ci(payload, "reason", "comment", "note", "message", "remark") or "")
         signature = (_header(headers, SIGNATURE_HEADERS[self.provider])
                      or _get_ci(value, "signature", "sign")
                      or _get_ci(payload, "signature", "sign"))
@@ -244,9 +312,11 @@ class ApprovalCallbackAdapter:
                  or _get_ci(payload, "nonce"))
         idempotency_key = (_header(headers, IDEMPOTENCY_HEADERS[self.provider])
                            or _get_ci(value, "idempotency_key", "idempotencyKey",
-                                      "event_id", "eventId", "msg_id", "msgId")
+                                      "event_id", "eventId", "event_key", "eventKey",
+                                      "msg_id", "msgId", "message_id", "messageId")
                            or _get_ci(payload, "idempotency_key", "idempotencyKey",
-                                      "event_id", "eventId", "msg_id", "msgId")
+                                      "event_id", "eventId", "event_key", "eventKey",
+                                      "msg_id", "msgId", "message_id", "messageId")
                            or _get_ci(_as_dict(payload.get("header")), "event_id", "eventId"))
 
         return {
@@ -266,10 +336,8 @@ class ApprovalCallbackAdapter:
 
     # ---------------- 主流程 ----------------
 
-    def handle(self, body: Any, headers: Any = None) -> dict[str, Any]:
-        raw = _body_bytes(body)
-        parsed = self._extract(_json_object(raw), headers or {})
-
+    def _prepare_inbound(self, raw: bytes, headers: Any) -> dict[str, Any]:
+        parsed = self._extract(_json_object(raw), headers)
         verification = verify_inbound(
             self.secret,
             raw,
@@ -285,7 +353,26 @@ class ApprovalCallbackAdapter:
             reason = str(verification.get("reason") or "回调验签失败")
             code = "replay" if "nonce" in reason else "verification_failed"
             raise ApprovalCallbackError(code, reason)
-        timestamp = int(verification["timestamp"])
+        return {"parsed": parsed, "timestamp": int(verification["timestamp"])}
+
+    @staticmethod
+    def _challenge_response(prepared: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "provider": str(prepared.get("provider") or ""),
+            "challenge": str(prepared.get("challenge") or ""),
+            "echostr": str(prepared.get("challenge") or ""),
+            "duplicate": False,
+            "timestamp": int(prepared.get("timestamp") or 0),
+        }
+
+    def handle(self, body: Any, headers: Any = None) -> dict[str, Any]:
+        raw = _body_bytes(body)
+        prepared = self._prepare_inbound(raw, headers or {})
+        if "challenge" in prepared:
+            return self._challenge_response({**prepared, "provider": self.provider})
+        parsed = prepared["parsed"]
+        timestamp = int(prepared["timestamp"])
 
         decision = _normalise_decision(parsed["decision"])
         actor = str(parsed["actor"]).strip()
@@ -476,17 +563,184 @@ class MockApprovalCallbackAdapter(ApprovalCallbackAdapter):
 
 
 class FeishuApprovalCallbackAdapter(ApprovalCallbackAdapter):
-    """飞书卡片回调协议适配器；只做字段映射，不引入厂商 SDK。"""
+    """飞书事件/卡片回调：官方签名、Verification Token 与 Encrypt Key 解密。"""
 
-    def __init__(self, **kwargs: Any):
+    def __init__(self, *, verification_token: str = "", encrypt_key: str = "",
+                 **kwargs: Any):
         super().__init__("feishu", **kwargs)
+        self.verification_token = str(
+            verification_token or os.getenv("FEISHU_VERIFICATION_TOKEN") or self.secret
+        ).strip()
+        self.encrypt_key = str(
+            encrypt_key or os.getenv("FEISHU_ENCRYPT_KEY") or ""
+        ).strip()
+
+    def _signature_ok(self, raw: bytes, timestamp: Any, nonce: Any, signature: Any) -> bool:
+        keys = (self.encrypt_key, self.verification_token, self.secret)
+        for key in keys:
+            if not key:
+                continue
+            material = f"{timestamp}{nonce}{key}".encode("utf-8") + raw
+            expected = hashlib.sha256(material).hexdigest()
+            if hmac.compare_digest(expected, str(signature)):
+                return True
+        return False
+
+    @staticmethod
+    def _decrypt_encrypt_value(value: Any, encrypt_key: str) -> dict[str, Any]:
+        if not encrypt_key:
+            raise ApprovalCallbackError("missing_encrypt_key", "飞书 Encrypt Key 未配置", status_code=500)
+        blob = _base64_decode(value, "encrypt")
+        if len(blob) < 32 or len(blob) % 16:
+            raise ApprovalCallbackError("decryption_failed", "飞书密文长度非法")
+        plaintext = _decode_aes_cbc(
+            blob[16:], hashlib.sha256(encrypt_key.encode("utf-8")).digest(), blob[:16],
+        )
+        try:
+            payload = json.loads(plaintext.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ApprovalCallbackError("decryption_failed", "飞书明文不是合法 JSON") from exc
+        if not isinstance(payload, dict):
+            raise ApprovalCallbackError("decryption_failed", "飞书明文必须是 JSON 对象")
+        return payload
+
+    def _prepare_inbound(self, raw: bytes, headers: Any) -> dict[str, Any]:
+        outer = _json_object(raw)
+        encrypted = _get_ci(outer, "encrypt")
+        header = _as_dict(outer.get("header"))
+        token = _get_ci(outer, "token") or _get_ci(header, "token")
+        if not encrypted and token is None and not self.encrypt_key:
+            return super()._prepare_inbound(raw, headers)
+
+        signature = _required(
+            _header(headers, SIGNATURE_HEADERS["feishu"])
+            or _get_ci(outer, "signature", "sign"),
+            "signature",
+        )
+        timestamp = _required(
+            _header(headers, TIMESTAMP_HEADERS["feishu"])
+            or _get_ci(outer, "timestamp", "ts"),
+            "timestamp",
+        )
+        nonce = _required(
+            _header(headers, NONCE_HEADERS["feishu"])
+            or _get_ci(outer, "nonce"),
+            "nonce",
+        )
+        try:
+            moment = int(timestamp)
+        except (TypeError, ValueError) as exc:
+            raise ApprovalCallbackError("verification_failed", "timestamp 非法") from exc
+        if not _within_tolerance(moment, int(self._now()), self.tolerance):
+            raise ApprovalCallbackError("verification_failed", "回调时间超出容忍窗口")
+        if not self._signature_ok(raw, timestamp, nonce, signature):
+            raise ApprovalCallbackError("verification_failed", "飞书签名不匹配")
+
+        payload = self._decrypt_encrypt_value(encrypted, self.encrypt_key) if encrypted else outer
+        payload_header = _as_dict(payload.get("header"))
+        payload_token = _get_ci(payload, "token") or _get_ci(payload_header, "token")
+        if self.verification_token and str(payload_token or "") != self.verification_token:
+            raise ApprovalCallbackError("verification_failed", "飞书 Verification Token 不匹配")
+        if not self.guard.consume(str(nonce), self.provider):
+            raise ApprovalCallbackError("replay", "nonce 已使用（疑似重放）")
+
+        challenge = _get_ci(payload, "challenge")
+        if challenge is not None:
+            return {"challenge": str(challenge), "timestamp": moment, "provider": self.provider}
+
+        payload = dict(payload)
+        payload.setdefault("signature", str(signature))
+        payload.setdefault("timestamp", str(timestamp))
+        payload.setdefault("nonce", str(nonce))
+        return {"parsed": self._extract(payload, headers), "timestamp": moment}
 
 
 class WeComApprovalCallbackAdapter(ApprovalCallbackAdapter):
-    """企业微信审批回调协议适配器；只做字段映射，不引入厂商 SDK。"""
+    """企业微信 URL/XML 回调：SHA1 签名、EncodingAESKey 解密与 receiveid 校验。"""
 
-    def __init__(self, **kwargs: Any):
+    def __init__(self, *, token: str = "", encoding_aes_key: str = "",
+                 receive_id: str = "", corp_id: str = "", **kwargs: Any):
         super().__init__("wecom", **kwargs)
+        self.token = str(token or os.getenv("WECOM_CALLBACK_TOKEN") or self.secret).strip()
+        self.encoding_aes_key = str(
+            encoding_aes_key or os.getenv("WECOM_ENCODING_AES_KEY") or ""
+        ).strip()
+        self.receive_id = str(
+            receive_id or corp_id or os.getenv("WECOM_CORP_ID") or ""
+        ).strip()
+
+    def _signature_ok(self, timestamp: Any, nonce: Any, signed_value: Any, signature: Any) -> bool:
+        expected = hashlib.sha1(
+            "".join(sorted((self.token, str(timestamp), str(nonce), str(signed_value))))
+            .encode("utf-8")
+        ).hexdigest()
+        return hmac.compare_digest(expected, str(signature))
+
+    def _decrypt(self, encrypted: Any) -> tuple[str, str]:
+        if not self.encoding_aes_key:
+            raise ApprovalCallbackError(
+                "missing_encoding_aes_key", "企微 EncodingAESKey 未配置", status_code=500)
+        encoded_key = self.encoding_aes_key.rstrip("=")
+        key = _base64_decode(encoded_key + "=", "EncodingAESKey")
+        if len(key) != 32:
+            raise ApprovalCallbackError("decryption_failed", "企微 EncodingAESKey 长度非法")
+        blob = _base64_decode(encrypted, "Encrypt")
+        plaintext = _decode_aes_cbc(blob, key, key[:16], block_size=256)
+        if len(plaintext) < 20:
+            raise ApprovalCallbackError("decryption_failed", "企微明文结构非法")
+        message_length = struct.unpack(">I", plaintext[16:20])[0]
+        if message_length > len(plaintext) - 20:
+            raise ApprovalCallbackError("decryption_failed", "企微明文长度非法")
+        try:
+            message = plaintext[20:20 + message_length].decode("utf-8")
+            receive_id = plaintext[20 + message_length:].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ApprovalCallbackError("decryption_failed", "企微明文编码非法") from exc
+        if not self.receive_id or receive_id != self.receive_id:
+            raise ApprovalCallbackError("receive_id_mismatch", "企微 receiveid 校验失败")
+        return message, receive_id
+
+    def _prepare_inbound(self, raw: bytes, headers: Any) -> dict[str, Any]:
+        params = _as_dict(headers)
+        echostr = _get_ci(params, "echostr", "echoStr")
+        if echostr is None and not raw.lstrip().startswith(b"<"):
+            return super()._prepare_inbound(raw, headers)
+
+        root = _xml_root(raw) if not echostr else None
+        signed_value = _xml_encrypted(root) if root is not None else echostr
+        signature = _required(
+            _get_ci(params, "msg_signature", "msgSignature", "signature", "sign")
+            or _header(headers, SIGNATURE_HEADERS["wecom"]),
+            "signature",
+        )
+        timestamp = _required(
+            _get_ci(params, "timestamp", "TimeStamp", "ts")
+            or _header(headers, TIMESTAMP_HEADERS["wecom"]),
+            "timestamp",
+        )
+        nonce = _required(
+            _get_ci(params, "nonce") or _header(headers, NONCE_HEADERS["wecom"]),
+            "nonce",
+        )
+        try:
+            moment = int(timestamp)
+        except (TypeError, ValueError) as exc:
+            raise ApprovalCallbackError("verification_failed", "timestamp 非法") from exc
+        if not _within_tolerance(moment, int(self._now()), self.tolerance):
+            raise ApprovalCallbackError("verification_failed", "回调时间超出容忍窗口")
+        if not self._signature_ok(timestamp, nonce, signed_value, signature):
+            raise ApprovalCallbackError("verification_failed", "企微签名不匹配")
+
+        plaintext, _ = self._decrypt(signed_value)
+        if not self.guard.consume(str(nonce), self.provider):
+            raise ApprovalCallbackError("replay", "nonce 已使用（疑似重放）")
+        if echostr is not None:
+            return {"challenge": plaintext, "timestamp": moment, "provider": self.provider}
+        payload = _xml_object(plaintext.encode("utf-8"))
+        payload.setdefault("signature", str(signature))
+        payload.setdefault("timestamp", str(timestamp))
+        payload.setdefault("nonce", str(nonce))
+        return {"parsed": self._extract(payload, headers), "timestamp": moment}
 
 
 def create_approval_callback_adapter(provider: str, **kwargs: Any) -> ApprovalCallbackAdapter:

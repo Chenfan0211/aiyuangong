@@ -118,18 +118,19 @@ TABLES: tuple[TableSpec, ...] = (
 
     TableSpec("users", "users",
               ("user_id", "username", "display_name", "password_algo", "password_salt", "password_hash",
-               "status", "created_at", "password_changed_at", "last_login_at"),
+               "status", "created_at", "password_changed_at", "last_login_at", "must_change_password"),
               ("user_id",),
-              timestamp_columns=("created_at", "password_changed_at", "last_login_at")),
+              timestamp_columns=("created_at", "password_changed_at", "last_login_at"),
+              boolean_columns=("must_change_password",)),
     TableSpec("memberships", "memberships",
               ("store_id", "user_id", "role", "status", "created_at"),
               ("tenant_id", "store_id", "user_id"),
               timestamp_columns=("created_at",)),
     TableSpec("auth_sessions", "auth_sessions",
-              ("token_hash", "user_id", "store_id", "role", "created_at", "expires_at", "last_seen_at",
-               "revoked_at", "revoked_reason"),
+              ("token_hash", "user_id", "store_id", "role", "created_at", "expires_at",
+               "absolute_expires_at", "last_seen_at", "revoked_at", "revoked_reason"),
               ("token_hash",),
-              timestamp_columns=("created_at", "expires_at", "last_seen_at", "revoked_at")),
+              timestamp_columns=("created_at", "expires_at", "absolute_expires_at", "last_seen_at", "revoked_at")),
     TableSpec("login_attempts", "login_attempts",
               ("scope_key", "fail_count", "first_failed_at", "last_failed_at", "locked_until"),
               ("scope_key",), inject_tenant=False,
@@ -257,6 +258,18 @@ def load_migrations() -> tuple[Migration, ...]:
         Migration(version=1, name="baseline_landed_schema", statements=baseline,
                   adopt_if_present="stores", requires_tables=tables_in_statements(baseline),
                   checksum_tracked=False),
+        Migration(
+            version=2,
+            name="auth_lifecycle_and_absolute_expiry",
+            statements=(
+                "alter table users add column if not exists must_change_password boolean not null default false",
+                "alter table auth_sessions add column if not exists absolute_expires_at timestamptz",
+                "update auth_sessions set absolute_expires_at=expires_at where absolute_expires_at is null",
+                "alter table auth_sessions alter column absolute_expires_at set not null",
+            ),
+            requires_tables=("users", "auth_sessions"),
+            checksum_tracked=True,
+        ),
     )
 
 

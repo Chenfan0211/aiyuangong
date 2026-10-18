@@ -20,10 +20,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
 from platform_data import DataValidationError, PlatformMetricStore
+from registry import RegistryStore
 from snapshot_builder import load_config
 
 ROOT = Path(__file__).resolve().parent
@@ -34,11 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", default=os.getenv("STORE_AGENT_METRICS_DB", str(ROOT / "data" / "platform_metrics.db")),
                         help="平台指标库：SQLite 路径或 postgresql:// DSN")
     parser.add_argument("--config", type=Path, default=Path(os.getenv("STORE_AGENT_CONFIG", ROOT / "store_config.json")))
-    parser.add_argument("--store-id", default="WH-LION-001", help="门店编码，默认 WH-LION-001")
+    parser.add_argument("--store-db", default=os.getenv("STORE_AGENT_STORE_DB", str(ROOT / "data" / "store_ops.db")),
+                        help="门店配置库：SQLite 路径或 postgresql:// DSN")
+    parser.add_argument("--store-id", default=None, help="门店编码；默认使用数据库配置，空库时回退 JSON")
 
     # 子命令内也接受 --store-id；default=SUPPRESS 保证不会覆盖全局上已给的值
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--store-id", default=argparse.SUPPRESS, help="门店编码，默认 WH-LION-001")
+    common.add_argument("--store-id", default=argparse.SUPPRESS, help="门店编码；默认使用数据库配置，空库时回退 JSON")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -69,37 +73,44 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    # 目标可以是 SQLite 路径，也可以是 postgresql:// DSN；PG 下用配置里的 tenant 做归属标注
-    tenant_id = ""
-    if isinstance(args.db, str) and args.db.startswith(("postgresql://", "postgres://")):
-        try:
-            tenant_id = str(load_config(args.config).get("tenant_id") or "")
-        except Exception:                                  # 配置缺失不阻塞，仅不做归属标注
-            tenant_id = ""
+    file_config = load_config(args.config)
+    lookup_config = dict(file_config)
+    if args.store_id:
+        lookup_config["store_id"] = args.store_id
+
+    tenant_id = str(lookup_config.get("tenant_id") or "")
+    registry = RegistryStore(args.store_db, tenant_id=tenant_id)
+    config_source = "数据库(database)" if registry.store_config(
+        tenant_id, str(lookup_config.get("store_id") or "")) is not None else "JSON 首次导入(json-first-import)"
+    print(f"配置来源：{config_source}", file=sys.stderr)
+    config = registry.effective_config(lookup_config)
+    tenant_id = str(config.get("tenant_id") or "")
+    store_id = str(config.get("store_id") or "")
+
     store = PlatformMetricStore(args.db, tenant_id=tenant_id)
     failed = 0
     try:
         if args.command == "import-dir":
-            payload = store.import_directory(args.inbox, args.store_id)
+            payload = store.import_directory(args.inbox, store_id)
             failed = int(payload["failed_count"])
         elif args.command == "import-csv":
-            payload = asdict(store.import_csv(args.path, args.store_id))
+            payload = asdict(store.import_csv(args.path, store_id))
         elif args.command == "import-packages":
-            payload = asdict(store.import_packages_csv(args.path, args.store_id))
+            payload = asdict(store.import_packages_csv(args.path, store_id))
         elif args.command == "import-reviews":
-            payload = asdict(store.import_reviews_csv(args.path, args.store_id))
+            payload = asdict(store.import_reviews_csv(args.path, store_id))
         elif args.command == "data-quality":
             payload = store.data_quality(
-                args.store_id,
+                store_id,
                 days=args.days,
                 fresh_days=args.fresh_days,
                 jump_alert_percent=args.jump_alert_percent,
                 batch_limit=args.batches,
             )
         elif args.command == "status":
-            payload = store.status(args.store_id)
+            payload = store.status(store_id)
         else:
-            payload = store.period_summary(args.store_id, args.days)
+            payload = store.period_summary(store_id, args.days)
     except (DataValidationError, ValueError, OSError) as exc:
         raise SystemExit(f"导入失败：{exc}") from exc
 

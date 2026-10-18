@@ -40,7 +40,8 @@ class OpsApiTests(unittest.TestCase):
         retry = self.client.post(f"/api/admin/ops-runs/{self.failed['id']}/retry", headers=self.headers)
         self.assertEqual(retry.status_code, 200, retry.text)
         self.assertTrue(retry.json()["accepted"])
-        self.assertEqual(retry.json()["queued_run"]["step_name"], "retry-request")
+        self.assertEqual(retry.json()["retry"]["step_name"], "import")
+        self.assertEqual(retry.json()["retry"]["status"], "pending")
 
 
 if __name__ == "__main__":

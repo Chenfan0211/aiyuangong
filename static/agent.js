@@ -5,6 +5,8 @@ const StoreSession = window.StoreSession;
 let currentPermissions = [];
 let authenticated = false;
 let mfaToken = '';
+let securityPending = false;
+let mfaEnrollmentStarted = false;
 let sessionId = sessionStorage.getItem('store-agent-session') || ('session-' + Date.now().toString(36));
 sessionStorage.setItem('store-agent-session', sessionId);
 
@@ -34,13 +36,130 @@ function hideMfa() {
   if (code) code.value = '';
 }
 
+function setSecurityHint(text, isError) {
+  const el = document.getElementById('mfaSetupHint');
+  el.textContent = text || '';
+  el.className = 'login-hint' + (isError ? ' error' : '');
+}
+
+function setPasswordHint(text, isError) {
+  const el = document.getElementById('passwordHint');
+  el.textContent = text || '';
+  el.className = 'login-hint' + (isError ? ' error' : '');
+}
+
+function setNodeHidden(id, hidden) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  node.hidden = hidden;
+  if (hidden) node.style.display = 'none';
+  else node.style.removeProperty('display');
+}
+
+function resetSecurityGate() {
+  securityPending = false;
+  mfaEnrollmentStarted = false;
+  setNodeHidden('securityGate', true);
+  setNodeHidden('mfaSetupCard', true);
+  setNodeHidden('recoveryCodesCard', true);
+  setNodeHidden('passwordSetupCard', true);
+  document.getElementById('mfaSecret').textContent = '';
+  document.getElementById('mfaOtpauth').textContent = '';
+  document.getElementById('mfaEnrollmentCode').value = '';
+  document.getElementById('recoveryCodes').textContent = '';
+  document.getElementById('securityStatus').textContent = '';
+  setSecurityHint('');
+  setPasswordHint('');
+}
+
+function setAppChromeVisible(visible) {
+  ['mainHeader', 'dataStrip', 'opsSection', 'reviewPanel', 'chat', 'composer', 'appLinks', 'scopeCard'].forEach(id => {
+    const node = document.getElementById(id);
+    if (node) node.hidden = !visible;
+  });
+}
+
+function flagValue(source, key) {
+  if (!source || typeof source !== 'object') return null;
+  const user = source.user && typeof source.user === 'object' ? source.user : {};
+  const context = source.context && typeof source.context === 'object' ? source.context : {};
+  for (const candidate of [source, context, user]) {
+    if (typeof candidate[key] === 'boolean') return candidate[key];
+  }
+  return null;
+}
+
+function securityFlags(...sources) {
+  let mfaEnrollmentRequired = null;
+  let mustChangePassword = null;
+  for (const source of sources) {
+    if (mfaEnrollmentRequired === null) mfaEnrollmentRequired = flagValue(source, 'mfa_enrollment_required');
+    if (mustChangePassword === null) mustChangePassword = flagValue(source, 'must_change_password');
+  }
+  return {
+    mfaEnrollmentRequired: mfaEnrollmentRequired === true,
+    mustChangePassword: mustChangePassword === true,
+  };
+}
+
+function applyIdentity(context) {
+  const source = context || {};
+  const user = source.user || source.context || {};
+  currentPermissions = source.permissions || currentPermissions;
+  if (user.name || user.display_name) {
+    document.getElementById('identityName').textContent = user.name || user.display_name;
+    document.getElementById('currentUser').textContent = user.name || user.display_name;
+  }
+  if (user.role_label || user.role) {
+    document.getElementById('currentRole').textContent = (user.role_label || user.role) + ' · ' + (source.store_id || '');
+  }
+}
+
+async function beginMfaEnrollment() {
+  if (mfaEnrollmentStarted) return;
+  mfaEnrollmentStarted = true;
+  setSecurityHint('正在生成 MFA 绑定信息…');
+  try {
+    const setup = await postJson('/api/auth/mfa/setup', {});
+    document.getElementById('mfaSecret').textContent = setup.secret || '';
+    document.getElementById('mfaOtpauth').textContent = setup.otpauth_uri || setup.otpauth || '';
+    setSecurityHint('');
+  } catch (error) {
+    mfaEnrollmentStarted = false;
+    setSecurityHint(error.message || 'MFA 绑定初始化失败', true);
+  }
+}
+
+async function showSecurityGate(context, flags) {
+  authenticated = true;
+  securityPending = true;
+  mfaToken = '';
+  document.getElementById('loginBox').hidden = true;
+  document.getElementById('userCard').hidden = false;
+  hideMfa();
+  applyIdentity(context);
+  setAppChromeVisible(false);
+  setNodeHidden('securityGate', false);
+
+  const needsMfa = flags.mfaEnrollmentRequired;
+  const needsPassword = flags.mustChangePassword;
+  setNodeHidden('passwordSetupCard', needsMfa || !needsPassword);
+  setNodeHidden('mfaSetupCard', !needsMfa);
+  document.getElementById('securityStatus').textContent = needsMfa && needsPassword
+    ? '请先完成 MFA 绑定，随后修改临时口令'
+    : (needsMfa ? '必须先绑定 MFA 才能继续' : '必须先修改临时口令才能继续');
+  if (needsMfa) await beginMfaEnrollment();
+}
+
 function showLogin(message) {
+  resetSecurityGate();
   authenticated = false;
   currentPermissions = [];
   mfaToken = '';
   document.getElementById('userCard').hidden = true;
   document.getElementById('loginBox').hidden = false;
   hideMfa();
+  setAppChromeVisible(true);
   document.getElementById('opsTitle').textContent = '今日三件事';
   document.getElementById('taskCards').innerHTML = '<div class="empty">登录后显示今日任务。</div>';
   const quality = document.getElementById('qualityStatus');
@@ -52,22 +171,61 @@ function showLogin(message) {
 }
 
 function showApp() {
+  resetSecurityGate();
   authenticated = true;
   document.getElementById('loginBox').hidden = true;
   document.getElementById('userCard').hidden = false;
   hideMfa();
+  setAppChromeVisible(true);
   setHint('');
 }
 
+async function refreshSecurityGateAfterForbidden(error) {
+  if (!error || error.status !== 403) return false;
+  const message = String(error.message || '');
+  if (!/MFA|绑定|临时口令|改密/.test(message)) return false;
+  try {
+    const me = await client.getJson('/api/auth/me');
+    const flags = securityFlags(me);
+    if (flags.mfaEnrollmentRequired || flags.mustChangePassword) {
+      await showSecurityGate(me, flags);
+      return true;
+    }
+  } catch (_error) {
+    // 下一次业务请求仍会再次校验，保留原始 403 更利于调用方处理。
+  }
+  return false;
+}
+
 async function getJson(path) {
-  return client.getJson(path);
+  try {
+    return await client.getJson(path);
+  } catch (error) {
+    if (await refreshSecurityGateAfterForbidden(error)) {
+      const handled = new Error('请先完成账户安全设置');
+      handled.status = 403;
+      throw handled;
+    }
+    throw error;
+  }
 }
 
 async function postJson(path, body) {
-  return client.postJson(path, body);
+  try {
+    return await client.postJson(path, body);
+  } catch (error) {
+    if (await refreshSecurityGateAfterForbidden(error)) {
+      const handled = new Error('请先完成账户安全设置');
+      handled.status = 403;
+      throw handled;
+    }
+    throw error;
+  }
 }
 
 async function login() {
+  sessionId = 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  sessionStorage.setItem('store-agent-session', sessionId);
   const username = document.getElementById('username').value.trim();
   const password = document.getElementById('password').value;
   if (!username || !password) {
@@ -84,7 +242,7 @@ async function login() {
       setHint('请输入动态验证码或一次性恢复码');
       return;
     }
-    await bootAll();
+    await bootAll(data);
   } catch (error) {
     setHint(error.message || '登录失败', true);
   }
@@ -98,11 +256,95 @@ async function verifyMfa() {
   }
   setHint('验证中…');
   try {
-    await client.postJson('/api/auth/mfa/verify', { mfa_token: mfaToken, code });
+    const data = await client.postJson('/api/auth/mfa/verify', { mfa_token: mfaToken, code });
     mfaToken = '';
-    await bootAll();
+    await bootAll(data);
   } catch (error) {
     setHint(error.message || '验证失败', true);
+  }
+}
+
+function renderRecoveryCodes(codes) {
+  const list = document.getElementById('recoveryCodes');
+  list.textContent = '';
+  codes.forEach(code => {
+    const item = document.createElement('li');
+    item.textContent = code;
+    list.appendChild(item);
+  });
+}
+
+async function enableMfa(event) {
+  if (event) event.preventDefault();
+  const code = document.getElementById('mfaEnrollmentCode').value.trim();
+  if (!code) {
+    setSecurityHint('请输入验证器中的 6 位验证码', true);
+    return;
+  }
+  const button = document.getElementById('enableMfaBtn');
+  button.disabled = true;
+  setSecurityHint('正在验证并启用 MFA…');
+  try {
+    const result = await postJson('/api/auth/mfa/enable', { code });
+    const codes = Array.isArray(result.recovery_codes) ? result.recovery_codes : [];
+    if (!codes.length) throw new Error('服务端未返回恢复码');
+    renderRecoveryCodes(codes);
+    setNodeHidden('mfaSetupCard', true);
+    setNodeHidden('recoveryCodesCard', false);
+    setSecurityHint('');
+    document.getElementById('securityStatus').textContent = '请立即保存恢复码；关闭后不会再次显示';
+    document.getElementById('finishMfaBtn').focus();
+  } catch (error) {
+    setSecurityHint(error.message || 'MFA 绑定失败', true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function finishMfaSetup() {
+  document.getElementById('recoveryCodes').textContent = '';
+  setNodeHidden('recoveryCodesCard', true);
+  document.getElementById('securityStatus').textContent = '正在刷新账户安全状态…';
+  try {
+    await bootAll();
+  } catch (error) {
+    setSecurityHint(error.message || '账户安全状态刷新失败', true);
+  }
+}
+
+async function changePassword(event) {
+  if (event) event.preventDefault();
+  const currentPassword = document.getElementById('currentPassword').value;
+  const newPassword = document.getElementById('newPassword').value;
+  const confirmPassword = document.getElementById('confirmPassword').value;
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    setPasswordHint('请填写全部口令字段', true);
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    setPasswordHint('两次输入的新口令不一致', true);
+    return;
+  }
+  if (newPassword.length < 10) {
+    setPasswordHint('新口令至少需要 10 个字符', true);
+    return;
+  }
+  const button = document.getElementById('changePasswordBtn');
+  button.disabled = true;
+  setPasswordHint('正在修改口令…');
+  try {
+    await postJson('/api/auth/password', {
+      current_password: currentPassword,
+      new_password: newPassword
+    });
+    document.getElementById('currentPassword').value = '';
+    document.getElementById('newPassword').value = '';
+    document.getElementById('confirmPassword').value = '';
+    showLogin('口令已修改，请使用新口令重新登录');
+  } catch (error) {
+    setPasswordHint(error.message || '口令修改失败', true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -165,9 +407,15 @@ function renderPlatformStatus(key, item) {
   el.textContent = `${item.label}：${label}至 ${item.max_date}`;
 }
 
-async function bootAll() {
-  showApp();
+async function bootAll(prefetched) {
   const me = await getJson('/api/auth/me');
+  const flags = securityFlags(prefetched, me);
+  applyIdentity(me);
+  if (flags.mfaEnrollmentRequired || flags.mustChangePassword) {
+    await showSecurityGate(me, flags);
+    return;
+  }
+  showApp();
   currentPermissions = me.permissions || [];
   document.getElementById('identityName').textContent = me.user.name;
   document.getElementById('currentUser').textContent = me.user.name;
@@ -383,6 +631,10 @@ async function ask(message) {
     setHint('请先登录', true);
     return;
   }
+  if (securityPending) {
+    document.getElementById('securityStatus').textContent = '请先完成账户安全设置';
+    return;
+  }
   addMessage('user', clean);
   input.value = '';
   send.disabled = true;
@@ -399,6 +651,9 @@ async function ask(message) {
 
 document.getElementById('loginBtn').addEventListener('click', login);
 document.getElementById('mfaVerifyBtn').addEventListener('click', verifyMfa);
+document.getElementById('mfaSetupCard').addEventListener('submit', enableMfa);
+document.getElementById('passwordSetupCard').addEventListener('submit', changePassword);
+document.getElementById('finishMfaBtn').addEventListener('click', finishMfaSetup);
 document.getElementById('password').addEventListener('keydown', event => {
   if (event.key === 'Enter') {
     event.preventDefault();

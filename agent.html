@@ -28,21 +28,62 @@
       <b id="currentUser">—</b><span id="currentRole">—</span>
       <button class="ghost" id="logoutBtn">退出登录</button>
     </div>
-    <div class="scope"><b id="scopeTitle">店长权限</b><span id="scopeText">可查看全店任务与经营诊断；高风险动作仍需审批。</span></div>
-    <div class="links"><a href="/dashboard">经营看板 →</a><a href="/governance">审批与审计中心 →</a><a href="/settings">设置与成员 →</a><a href="/index.html">查看完整落地方案 →</a><div class="demo">本页面是本地 MVP。身份下拉框用于演示，不是真实登录；接入门店前必须换成企业身份认证。</div></div>
+    <div class="scope" id="scopeCard"><b id="scopeTitle">店长权限</b><span id="scopeText">可查看全店任务与经营诊断；高风险动作仍需审批。</span></div>
+    <div class="links" id="appLinks"><a href="/dashboard">经营看板 →</a><a href="/governance">审批与审计中心 →</a><a href="/settings">设置与成员 →</a><a href="/index.html">查看完整落地方案 →</a><div class="demo">本页面是本地 MVP。身份下拉框用于演示，不是真实登录；接入门店前必须换成企业身份认证。</div></div>
   </aside>
   <main>
-    <header class="top"><div class="identity"><b id="identityName">武汉狮子座店店长</b><span id="taskCount">正在读取今日任务…</span></div><span class="badge">PILOT MVP</span></header>
-    <div class="data-strip" aria-label="平台数据状态"><span class="platform" id="meituanStatus">美团：检查中</span><span class="platform" id="douyinStatus">抖音：检查中</span><span class="platform" id="qualityStatus">数据质量：检查中</span></div>
+    <header class="top" id="mainHeader"><div class="identity"><b id="identityName">武汉狮子座店店长</b><span id="taskCount">正在读取今日任务…</span></div><span class="badge">PILOT MVP</span></header>
+    <div class="data-strip" id="dataStrip" aria-label="平台数据状态"><span class="platform" id="meituanStatus">美团：检查中</span><span class="platform" id="douyinStatus">抖音：检查中</span><span class="platform" id="qualityStatus">数据质量：检查中</span></div>
+    <section class="ops" id="securityGate" hidden aria-labelledby="securityTitle">
+      <div class="ops-head"><h2 id="securityTitle">账户安全设置</h2><span class="muted" id="securityStatus" role="status" aria-live="polite"></span></div>
+      <div class="cards">
+        <form class="card" id="mfaSetupCard" hidden aria-labelledby="mfaSetupTitle">
+          <h3 id="mfaSetupTitle">绑定动态验证码</h3>
+          <p id="mfaSetupIntro">请使用验证器应用扫描或手动录入密钥，然后输入应用中的 6 位验证码完成绑定。绑定前无法访问门店业务功能。</p>
+          <div class="user-select">
+            <label for="mfaSecret">TOTP 密钥</label>
+            <output id="mfaSecret" aria-live="polite"></output>
+            <label for="mfaOtpauth">otpauth 链接</label>
+            <output id="mfaOtpauth" aria-live="polite"></output>
+            <label for="mfaEnrollmentCode">动态验证码</label>
+            <input id="mfaEnrollmentCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码" />
+          </div>
+          <p class="login-hint" id="mfaSetupHint" role="alert" aria-live="assertive"></p>
+          <div class="acts"><button id="enableMfaBtn" type="submit">绑定并启用 MFA</button></div>
+        </form>
+
+        <section class="card" id="recoveryCodesCard" hidden aria-labelledby="recoveryCodesTitle">
+          <h3 id="recoveryCodesTitle">恢复码（仅显示一次）</h3>
+          <p>请立即将恢复码离线保存。每个恢复码只能使用一次，关闭后将无法再次查看。</p>
+          <ol id="recoveryCodes" aria-label="一次性恢复码"></ol>
+          <div class="acts"><button id="finishMfaBtn" type="button">我已保存，继续</button></div>
+        </section>
+
+        <form class="card" id="passwordSetupCard" hidden aria-labelledby="passwordSetupTitle">
+          <h3 id="passwordSetupTitle">修改临时口令</h3>
+          <p>首次登录必须设置个人口令。修改成功后当前会话会失效，请使用新口令重新登录。</p>
+          <div class="user-select">
+            <label for="currentPassword">当前临时口令</label>
+            <input id="currentPassword" type="password" autocomplete="current-password" required />
+            <label for="newPassword">新口令</label>
+            <input id="newPassword" type="password" autocomplete="new-password" minlength="10" required />
+            <label for="confirmPassword">确认新口令</label>
+            <input id="confirmPassword" type="password" autocomplete="new-password" minlength="10" required />
+          </div>
+          <p class="login-hint" id="passwordHint" role="alert" aria-live="assertive"></p>
+          <div class="acts"><button id="changePasswordBtn" type="submit">修改口令</button></div>
+        </form>
+      </div>
+    </section>
     <section class="ops" id="reviewPanel" aria-label="待验收任务" hidden><div class="ops-head"><h2 id="reviewTitle">待我验收</h2><span class="muted" id="reviewCount"></span></div><div class="cards" id="reviewCards"></div></section>
-    <section class="ops" aria-label="今日任务">
+    <section class="ops" id="opsSection" aria-label="今日任务">
       <div class="ops-head"><b id="opsTitle">今日三件事</b><button class="ghost" id="reportBtn">生成今日日报</button></div>
       <div class="cards" id="taskCards"><div class="empty">正在读取今日任务…</div></div>
     </section>
     <section class="chat" id="chat">
       <div class="welcome" id="welcome"><h2>随时问我门店运营问题</h2><p>我会结合你的身份、平台真实数据、今日任务和门店规则回答，并说明数据依据。</p><div class="suggestions"><button data-prompt="分析最近7天美团和抖音数据">分析平台数据</button><button data-prompt="我今天有什么任务？">今天做什么</button><button data-prompt="这些任务为什么生成？">为什么生成</button><button data-prompt="差评应该怎么处理？">差评怎么处理</button><button data-prompt="任务完成需要什么证据？">完成证据</button><button data-prompt="数据齐不齐？">数据齐不齐</button><button data-prompt="生成今日日报">今日日报</button></div></div>
     </section>
-    <footer class="composer"><div class="compose-row"><textarea id="input" rows="1" placeholder="问问 Agent，例如：我今天有什么任务？"></textarea><button class="send" id="send">发送</button></div><p class="hint">请勿输入顾客完整手机号、身份证、工资或平台密钥。改价、赔付、警告、奖惩和发布不会被直接执行。</p></footer>
+    <footer class="composer" id="composer"><div class="compose-row"><textarea id="input" rows="1" placeholder="问问 Agent，例如：我今天有什么任务？"></textarea><button class="send" id="send">发送</button></div><p class="hint">请勿输入顾客完整手机号、身份证、工资或平台密钥。改价、赔付、警告、奖惩和发布不会被直接执行。</p></footer>
   </main>
 </div>
 <script src="/static/session-client.js"></script>

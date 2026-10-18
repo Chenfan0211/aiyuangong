@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
 """审批回调适配层的契约测试：mock / 飞书 / 企微统一协议。"""
+import base64
+import hashlib
 import json
+import struct
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from approval_callbacks import (
     ApprovalCallbackAdapter,
@@ -19,6 +25,11 @@ STORE_B = "WH-LION-002"
 TENANT = "LPL-001"
 SIGNING_KEY = "local-callback-signing-key"  # noqa: secret - 测试夹具，不是第三方密钥
 NOW = 1_800_000_000
+FEISHU_TOKEN = "fixture-feishu-verification-token"
+FEISHU_ENCRYPT_KEY = "fixture-feishu-encrypt-key"
+WECOM_TOKEN = "fixture-wecom-callback-token"
+WECOM_AES_KEY = base64.b64encode(b"W" * 32).decode("ascii").rstrip("=")
+WECOM_CORP_ID = "ww-fixture-corp"
 RESULT_KEYS = {
     "ok", "provider", "approval_id", "decision", "decided_by", "reason",
     "idempotency_key", "duplicate", "result", "timestamp",
@@ -103,6 +114,85 @@ class Base(unittest.TestCase):
         return raw, headers
 
 
+    @staticmethod
+    def _pad(raw, block_size):
+        padding = block_size - (len(raw) % block_size)
+        return raw + bytes([padding]) * padding
+
+    def feishu_encrypted_envelope(self, approval_id, decision="approved", *, key="cb-idem-1",
+                                  nonce="cb-nonce-1", timestamp=NOW, reason="",
+                                  actor="ou_manager", token=FEISHU_TOKEN,
+                                  encrypt_key=FEISHU_ENCRYPT_KEY, encrypt_value=None,
+                                  signature_key=None):
+        plaintext = {
+            "token": token,
+            "header": {"event_type": "card.action.trigger", "event_id": key},
+            "event": {
+                "operator": {"open_id": actor},
+                "action": {"value": {
+                    "approval_id": approval_id,
+                    "decision": decision,
+                    "reason": reason,
+                }},
+            },
+        }
+        if encrypt_value is None:
+            encoded = json.dumps(plaintext, ensure_ascii=False, separators=(",", ":"),
+                                 sort_keys=True).encode("utf-8")
+            iv = b"0123456789abcdef"
+            cipher = Cipher(algorithms.AES(hashlib.sha256(encrypt_key.encode("utf-8")).digest()),
+                            modes.CBC(iv)).encryptor()
+            ciphertext = cipher.update(self._pad(encoded, 16)) + cipher.finalize()
+            encrypt_value = base64.b64encode(iv + ciphertext).decode("ascii")
+        raw = json.dumps({"encrypt": encrypt_value}, ensure_ascii=False,
+                         separators=(",", ":"), sort_keys=True).encode("utf-8")
+        material = f"{timestamp}{nonce}{signature_key or encrypt_key}".encode("utf-8") + raw
+        signature = hashlib.sha256(material).hexdigest()
+        headers = {
+            "X-Lark-Request-Timestamp": str(timestamp),
+            "X-Lark-Signature": signature,
+            "X-Lark-Request-Nonce": nonce,
+            "X-Idempotency-Key": key,
+        }
+        return raw, headers
+
+    def wecom_encrypt_value(self, plaintext, *, encoding_aes_key=WECOM_AES_KEY,
+                            receive_id=WECOM_CORP_ID):
+        key = base64.b64decode(encoding_aes_key + "=")
+        payload = plaintext.encode("utf-8")
+        message = b"R" * 16 + struct.pack(">I", len(payload)) + payload + receive_id.encode("utf-8")
+        cipher = Cipher(algorithms.AES(key), modes.CBC(key[:16])).encryptor()
+        encrypted = cipher.update(self._pad(message, 32)) + cipher.finalize()
+        return base64.b64encode(encrypted).decode("ascii")
+
+    def wecom_envelope(self, approval_id, decision="approved", *, key="cb-idem-1",
+                       nonce="cb-nonce-1", timestamp=NOW, reason="", actor="wecom-manager",
+                       token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+                       receive_id=WECOM_CORP_ID, encrypted=None):
+        plaintext = (
+            "<xml>"
+            f"<ApprovalId>{approval_id}</ApprovalId>"
+            f"<Decision>{decision}</Decision>"
+            f"<UserId>{actor}</UserId>"
+            f"<Reason>{reason}</Reason>"
+            f"<EventKey>{key}</EventKey>"
+            "</xml>"
+        )
+        encrypted = encrypted or self.wecom_encrypt_value(
+            plaintext, encoding_aes_key=encoding_aes_key, receive_id=receive_id)
+        raw = f"<xml><ToUserName>{receive_id}</ToUserName><Encrypt>{encrypted}</Encrypt></xml>".encode("utf-8")
+        signature = hashlib.sha1(
+            "".join(sorted((token, str(timestamp), nonce, encrypted))).encode("utf-8")
+        ).hexdigest()
+        headers = {
+            "msg_signature": signature,
+            "timestamp": str(timestamp),
+            "nonce": nonce,
+            "X-Idempotency-Key": key,
+        }
+        return raw, headers
+
+
 class AdapterContractTests(Base):
     def test_mock_approval_returns_fixed_structure_and_decides(self):
         approval = self.approval()
@@ -139,6 +229,53 @@ class AdapterContractTests(Base):
         self.assertEqual(result["decision"], "rejected")
         self.assertEqual(result["reason"], "毛利不达标")
         self.assertEqual(self.approvals.get(approval["approval_id"])["status"], "rejected")
+
+    def test_feishu_encrypted_real_protocol_decrypts_and_decides(self):
+        approval = self.approval()
+        raw, headers = self.feishu_encrypted_envelope(
+            approval["approval_id"], reason="同意试点", actor="ou_manager")
+        result = self.adapter(
+            "feishu", verification_token=FEISHU_TOKEN, encrypt_key=FEISHU_ENCRYPT_KEY,
+        ).handle(raw, headers)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["decision"], "approved")
+        self.assertEqual(result["decided_by"], "ou_manager")
+        self.assertEqual(self.approvals.get(approval["approval_id"])["status"], "approved")
+
+    def test_wecom_real_xml_protocol_decrypts_and_decides(self):
+        approval = self.approval()
+        raw, headers = self.wecom_envelope(
+            approval["approval_id"], decision="reject", reason="毛利不达标",
+            actor="wecom-manager")
+        result = self.adapter(
+            "wecom", token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+            receive_id=WECOM_CORP_ID,
+        ).handle(raw, headers)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["decision"], "rejected")
+        self.assertEqual(result["reason"], "毛利不达标")
+        self.assertEqual(result["decided_by"], "wecom-manager")
+        self.assertEqual(self.approvals.get(approval["approval_id"])["status"], "rejected")
+
+    def test_wecom_url_verification_returns_decrypted_challenge(self):
+        encrypted = self.wecom_encrypt_value("echo-ok")
+        timestamp, nonce = NOW, "wecom-url-nonce"
+        signature = hashlib.sha1(
+            "".join(sorted((WECOM_TOKEN, str(timestamp), nonce, encrypted))).encode("utf-8")
+        ).hexdigest()
+        params = {
+            "echostr": encrypted,
+            "msg_signature": signature,
+            "timestamp": str(timestamp),
+            "nonce": nonce,
+        }
+        result = self.adapter(
+            "wecom", token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+            receive_id=WECOM_CORP_ID,
+        ).handle(b"", params)
+        self.assertEqual(result["provider"], "wecom")
+        self.assertEqual(result["challenge"], "echo-ok")
+        self.assertFalse(result["duplicate"])
 
     def test_factory_accepts_direct_adapter_class(self):
         adapter = ApprovalCallbackAdapter(
@@ -201,6 +338,86 @@ class VerificationTests(Base):
         self.assertEqual(ctx.exception.code, "invalid_payload")
 
 
+    def test_feishu_real_bad_signature_does_not_consume_nonce(self):
+        approval = self.approval()
+        raw, headers = self.feishu_encrypted_envelope(
+            approval["approval_id"], nonce="feishu-bad-signature-nonce")
+        bad = dict(headers)
+        bad["X-Lark-Signature"] = "0" * 64
+        adapter = self.adapter(
+            "feishu", verification_token=FEISHU_TOKEN, encrypt_key=FEISHU_ENCRYPT_KEY,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, bad)
+        self.assertEqual(ctx.exception.code, "verification_failed")
+        self.assertTrue(adapter.handle(raw, headers)["ok"])
+
+    def test_feishu_real_decrypt_failure_is_rejected(self):
+        approval = self.approval()
+        raw, headers = self.feishu_encrypted_envelope(
+            approval["approval_id"],
+            encrypt_value=base64.b64encode(b"not-aes-ciphertext").decode("ascii"),
+        )
+        adapter = self.adapter(
+            "feishu", verification_token=FEISHU_TOKEN, encrypt_key=FEISHU_ENCRYPT_KEY,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, headers)
+        self.assertEqual(ctx.exception.code, "decryption_failed")
+
+    def test_feishu_real_verification_token_mismatch_is_rejected(self):
+        approval = self.approval()
+        raw, headers = self.feishu_encrypted_envelope(
+            approval["approval_id"], token="wrong-verification-token",  # noqa: secret
+        )
+        adapter = self.adapter(
+            "feishu", verification_token=FEISHU_TOKEN, encrypt_key=FEISHU_ENCRYPT_KEY,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, headers)
+        self.assertEqual(ctx.exception.code, "verification_failed")
+
+    def test_wecom_real_bad_signature_does_not_consume_nonce(self):
+        approval = self.approval()
+        raw, headers = self.wecom_envelope(
+            approval["approval_id"], nonce="wecom-bad-signature-nonce")
+        bad = dict(headers)
+        bad["msg_signature"] = "0" * 40
+        adapter = self.adapter(
+            "wecom", token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+            receive_id=WECOM_CORP_ID,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, bad)
+        self.assertEqual(ctx.exception.code, "verification_failed")
+        self.assertTrue(adapter.handle(raw, headers)["ok"])
+
+    def test_wecom_real_decrypt_failure_is_rejected(self):
+        approval = self.approval()
+        raw, headers = self.wecom_envelope(
+            approval["approval_id"],
+            encrypted=base64.b64encode(b"not-aes-ciphertext").decode("ascii"),
+        )
+        adapter = self.adapter(
+            "wecom", token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+            receive_id=WECOM_CORP_ID,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, headers)
+        self.assertEqual(ctx.exception.code, "decryption_failed")
+
+    def test_wecom_real_receiveid_mismatch_is_rejected(self):
+        approval = self.approval()
+        raw, headers = self.wecom_envelope(
+            approval["approval_id"], receive_id="another-corp")
+        adapter = self.adapter(
+            "wecom", token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+            receive_id=WECOM_CORP_ID,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, headers)
+        self.assertEqual(ctx.exception.code, "receive_id_mismatch")
+
 class IdempotencyTests(Base):
     def test_duplicate_idempotency_key_with_new_nonce_does_not_execute_twice(self):
         approval = self.approval()
@@ -245,6 +462,54 @@ class IdempotencyTests(Base):
         self.assertTrue(result["duplicate"])
         self.assertEqual(self.approvals.get(approval["approval_id"])["status"], "approved")
 
+
+    def test_feishu_real_duplicate_event_with_new_nonce_does_not_execute_twice(self):
+        approval = self.approval()
+        calls = []
+
+        def apply(approval_id, decision, actor, reason):
+            calls.append((approval_id, decision, actor, reason))
+            return {"approval": self.approvals.decide(approval_id, decision, actor, reason),
+                    "task": None, "task_note": None}
+
+        adapter = self.adapter(
+            "feishu", verification_token=FEISHU_TOKEN, encrypt_key=FEISHU_ENCRYPT_KEY,
+            decision_applier=apply,
+        )
+        raw, headers = self.feishu_encrypted_envelope(approval["approval_id"])
+        encrypted = json.loads(raw.decode("utf-8"))["encrypt"]
+        first = adapter.handle(raw, headers)
+        raw2, headers2 = self.feishu_encrypted_envelope(
+            approval["approval_id"], key="cb-idem-1", nonce="cb-nonce-2",
+            encrypt_value=encrypted)
+        second = adapter.handle(raw2, headers2)
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(len(calls), 1)
+
+    def test_wecom_real_duplicate_event_with_new_nonce_does_not_execute_twice(self):
+        approval = self.approval()
+        calls = []
+
+        def apply(approval_id, decision, actor, reason):
+            calls.append((approval_id, decision, actor, reason))
+            return {"approval": self.approvals.decide(approval_id, decision, actor, reason),
+                    "task": None, "task_note": None}
+
+        adapter = self.adapter(
+            "wecom", token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+            receive_id=WECOM_CORP_ID, decision_applier=apply,
+        )
+        raw, headers = self.wecom_envelope(approval["approval_id"])
+        encrypted = ET.fromstring(raw).findtext("Encrypt")
+        first = adapter.handle(raw, headers)
+        raw2, headers2 = self.wecom_envelope(
+            approval["approval_id"], key="cb-idem-1", nonce="cb-nonce-2",
+            encrypted=encrypted)
+        second = adapter.handle(raw2, headers2)
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(len(calls), 1)
 
 class DecisionSafetyTests(Base):
     def test_invalid_approval_id_is_rejected(self):
@@ -302,6 +567,39 @@ class DecisionSafetyTests(Base):
             self.adapter("other")
         self.assertEqual(ctx.exception.code, "unknown_provider")
 
+
+    def test_feishu_real_illegal_action_is_rejected(self):
+        approval = self.approval()
+        raw, headers = self.feishu_encrypted_envelope(
+            approval["approval_id"], decision="execute")
+        adapter = self.adapter(
+            "feishu", verification_token=FEISHU_TOKEN, encrypt_key=FEISHU_ENCRYPT_KEY,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, headers)
+        self.assertEqual(ctx.exception.code, "invalid_action")
+        self.assertEqual(self.approvals.get(approval["approval_id"])["status"], "pending")
+
+    def test_wecom_real_invalid_approval_id_is_rejected(self):
+        raw, headers = self.wecom_envelope("apr-does-not-exist")
+        adapter = self.adapter(
+            "wecom", token=WECOM_TOKEN, encoding_aes_key=WECOM_AES_KEY,
+            receive_id=WECOM_CORP_ID,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, headers)
+        self.assertEqual(ctx.exception.code, "invalid_approval_id")
+
+    def test_feishu_real_cross_store_approval_is_rejected(self):
+        approval = self.approval(store_id=STORE_B)
+        raw, headers = self.feishu_encrypted_envelope(approval["approval_id"])
+        adapter = self.adapter(
+            "feishu", verification_token=FEISHU_TOKEN, encrypt_key=FEISHU_ENCRYPT_KEY,
+        )
+        with self.assertRaises(ApprovalCallbackError) as ctx:
+            adapter.handle(raw, headers)
+        self.assertEqual(ctx.exception.code, "scope_mismatch")
+        self.assertEqual(self.approvals.get(approval["approval_id"])["status"], "pending")
 
 class TaskIntegrationTests(Base):
     def test_approved_callback_moves_linked_task_to_ready(self):

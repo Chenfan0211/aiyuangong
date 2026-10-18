@@ -33,6 +33,7 @@ import json
 import mimetypes
 import re
 import secrets
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
@@ -649,10 +650,15 @@ def main() -> None:
                         help="session=必须登录（默认）；demo=允许伪身份，仅限本机演示")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    file_config = load_config(args.config)
+    lookup_config = dict(file_config)
+    tenant_id = str(lookup_config.get("tenant_id") or "")
+    registry = RegistryStore(args.store_db, tenant_id=tenant_id)
+    config_source = "数据库(database)" if registry.store_config(
+        tenant_id, str(lookup_config.get("store_id") or "")) is not None else "JSON 首次导入(json-first-import)"
+    print(f"配置来源：{config_source}", file=sys.stderr)
+    config = registry.effective_config(lookup_config)
     tenant_id = str(config.get("tenant_id") or "")
-    # 注册门店并做跨租户守卫（同一 store_id 不允许出现在两个租户下）
-    RegistryStore(args.store_db, tenant_id=tenant_id).register(config)
     metric_store = PlatformMetricStore(args.metrics_db, tenant_id=tenant_id)
     task_store = TaskStore(args.store_db, tenant_id=tenant_id)
     auth_store = AuthStore(args.store_db, tenant_id=tenant_id)

@@ -175,8 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
     auth_passwd.add_argument("--password-stdin", action="store_true",
                              help="从标准输入读取口令（供脚本/自动化使用）")
 
-    config_import = sub.add_parser("config-import", help="将 JSON 配置导入数据库（首次或人工灾备导入）")
+    config_import = sub.add_parser("config-import", help="将 JSON 配置导入数据库（首次或使用 --force 人工覆盖）")
     config_import.add_argument("--file", type=Path, default=None)
+    config_import.add_argument("--force", action="store_true", help="数据库已有配置时显式覆盖")
 
     config_export = sub.add_parser("config-export", help="从数据库导出配置 JSON（灾备）")
     config_export.add_argument("--out", type=Path, required=True)
@@ -190,31 +191,50 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     try:
-        config = load_config(args.config)
-        store_id = args.store_id or str(config.get("store_id") or "")
-        tenant_id = str(config.get("tenant_id") or "")
-        # 注册门店并做跨租户守卫（同一 store_id 不允许出现在两个租户下）
-        RegistryStore(args.store_db, tenant_id=tenant_id).register(config)
-        metrics = PlatformMetricStore(args.metrics_db, tenant_id=tenant_id)
-        task_store = TaskStore(args.store_db, tenant_id=tenant_id)
-        approvals = ApprovalStore(args.store_db, tenant_id=tenant_id)
-
         if args.command == "config-import":
             source = args.file or args.config
             imported = load_config(source)
             registry = RegistryStore(args.store_db, tenant_id=str(imported.get("tenant_id") or ""))
-            registered = registry.register(imported)
-            payload = {"imported": True, "file": str(source), "member": registered,
-                       "revision": registry.current_revision(registered["tenant_id"], registered["store_id"])}
-        elif args.command == "config-export":
-            registry = RegistryStore(args.store_db, tenant_id=tenant_id)
+            registered = registry.import_config(imported, force=args.force)
+            payload = {
+                "imported": True,
+                "file": str(source),
+                "member": registered,
+                "revision": registry.current_revision(registered["tenant_id"], registered["store_id"]),
+                "forced": bool(args.force),
+            }
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return
+
+        file_config = load_config(args.config)
+        lookup_config = dict(file_config)
+        if args.store_id:
+            lookup_config["store_id"] = args.store_id
+        tenant_id = str(lookup_config.get("tenant_id") or "")
+        registry = RegistryStore(args.store_db, tenant_id=tenant_id)
+
+        if args.command == "config-export":
+            store_id = args.store_id or str(file_config.get("store_id") or "")
             exported = registry.store_config(tenant_id, store_id)
             if exported is None:
                 raise SystemExit("数据库中没有门店配置，请先执行 config-import")
             args.out.write_text(json.dumps(exported, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             payload = {"exported": True, "path": str(args.out),
                        "revision": registry.current_revision(tenant_id, store_id)}
-        elif args.command == "snapshot":
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+            return
+
+        config_source = "数据库(database)" if registry.store_config(
+            tenant_id, str(lookup_config.get("store_id") or "")) is not None else "JSON 首次导入(json-first-import)"
+        print(f"配置来源：{config_source}", file=sys.stderr)
+        config = registry.effective_config(lookup_config)
+        store_id = str(config.get("store_id") or "")
+        tenant_id = str(config.get("tenant_id") or "")
+        metrics = PlatformMetricStore(args.metrics_db, tenant_id=tenant_id)
+        task_store = TaskStore(args.store_db, tenant_id=tenant_id)
+        approvals = ApprovalStore(args.store_db, tenant_id=tenant_id)
+
+        if args.command == "snapshot":
             payload = build_snapshot(config, metrics, args.date, task_store=task_store)
         elif args.command == "plan":
             snapshot = build_snapshot(config, metrics, args.date, task_store=task_store)

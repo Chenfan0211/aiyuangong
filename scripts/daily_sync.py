@@ -13,7 +13,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -97,6 +97,41 @@ def _command(args: Sequence[Any], *, step_name: str) -> dict[str, Any]:
     return details
 
 
+def build_backup_commands(args: argparse.Namespace) -> list[list[str]]:
+    """构造加密备份命令及 daily/monthly 保留清理命令。"""
+    python = str(getattr(args, "python", sys.executable))
+    config = Path(getattr(args, "config"))
+    store_db = str(getattr(args, "store_db"))
+    tenant_id = str(getattr(args, "tenant_id", "") or "")
+    store_id = str(getattr(args, "store_id", "") or "")
+    evidence_dir = _env_path("STORE_AGENT_EVIDENCE_DIR", ROOT / "evidence")
+    backup_dir = Path(getattr(args, "backup_dir"))
+    backup_manager = ROOT / "backup_manager.py"
+
+    backup = [
+        python, str(backup_manager), "backup",
+        "--db", store_db,
+        "--tenant-id", tenant_id,
+        "--store-id", store_id,
+        "--evidence-dir", str(evidence_dir),
+        "--config", str(config),
+        "--local-root", str(backup_dir),
+        "--daily-keep", "30",
+        "--monthly-keep", "12",
+    ]
+    prune_daily = [
+        python, str(backup_manager), "prune",
+        "--category", "daily", "--keep", "30",
+        "--local-root", str(backup_dir),
+    ]
+    prune_monthly = [
+        python, str(backup_manager), "prune",
+        "--category", "monthly", "--keep", "12",
+        "--local-root", str(backup_dir),
+    ]
+    return [backup, prune_daily, prune_monthly]
+
+
 def _run_many(commands: Sequence[tuple[str, Sequence[Any]]]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -135,12 +170,12 @@ def build_default_steps(args: argparse.Namespace) -> list[Step]:
 
     def backup_action() -> dict[str, Any]:
         backup_dir.mkdir(parents=True, exist_ok=True)
-        output = backup_dir / f"daily-{datetime.now():%Y%m%d-%H%M%S}.json.gz"
-        return _command(
-            [python, store_cli, "--config", config, "--store-db", store_db,
-             "backup", "--out", output],
-            step_name="backup",
-        )
+        commands = build_backup_commands(args)
+        return _run_many([
+            ("backup", commands[0]),
+            ("backup:prune-daily", commands[1]),
+            ("backup:prune-monthly", commands[2]),
+        ])
 
     def import_action() -> dict[str, Any]:
         return _command(

@@ -28,6 +28,20 @@ class AdminApiTests(unittest.TestCase):
         self.client.close()
         self.tmp.cleanup()
 
+    def test_member_role_and_status_update(self):
+        created = self.client.post("/api/admin/members", headers=self.headers,
+                                   json={"username": "staff03", "display_name": "员工小周", "role": "employee"}).json()
+        user_id = created["member"]["user_id"]
+        updated = self.client.patch(f"/api/admin/members/{user_id}", headers=self.headers,
+                                    json={"display_name": "运营小周", "role": "operator"})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["member"]["role"], "operator")
+        self.assertEqual(updated.json()["member"]["display_name"], "运营小周")
+        disabled = self.client.post(f"/api/admin/members/{user_id}/status", headers=self.headers,
+                                    json={"status": "disabled"})
+        self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(disabled.json()["member"]["membership_status"], "disabled")
+
     def test_settings_page_is_served(self):
         response = self.client.get("/settings")
         self.assertEqual(response.status_code, 200)

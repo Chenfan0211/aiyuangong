@@ -277,6 +277,7 @@ class OpsRunner:
         retry_delay: float = 0.0,
         tenant_id: str = "",
         store_id: str = "",
+        consume_retries: bool = True,
     ):
         if isinstance(store, OpsStore):
             self.store = store
@@ -287,6 +288,7 @@ class OpsRunner:
         self.job_name = str(job_name)
         self.fail_fast = bool(fail_fast)
         self.retry_delay = max(0.0, float(retry_delay))
+        self.consume_retries_on_run = bool(consume_retries)
         default_outbox = None
         if self.lock_path is None and self.store.db.dialect == "sqlite":
             default_outbox = Path(self.store.db.target).parent / "outbox"
@@ -323,6 +325,138 @@ class OpsRunner:
             return True, details, None
         return True, {"result": value}, None
 
+    def _retry_alert(self, request: dict[str, Any], run_id: Optional[int], error: str) -> str:
+        status = self._alert({
+            "job_name": request["job_name"],
+            "step_name": request["step_name"],
+            "status": "dead_letter",
+            "retry_request_id": request["id"],
+            "source_run_id": request["source_run_id"],
+            "attempt": request["attempt"],
+            "error": error,
+        })
+        if run_id is not None:
+            self.store.set_alert_status(int(run_id), status)
+        return status
+
+    def _execute_retry_request(
+        self,
+        request: dict[str, Any],
+        step_map: dict[str, Step],
+    ) -> dict[str, Any]:
+        """执行一条已领取的重试请求，只允许调用本 runner 已配置的 Step。"""
+        step = step_map.get(str(request["step_name"]))
+        base_details = {
+            "retry_request_id": request["id"],
+            "source_run_id": request["source_run_id"],
+            "requested_by": request["requested_by"],
+            "step": request["step_name"],
+        }
+        if step is None:
+            error = f"未配置原步骤，拒绝执行任意动作：{request['step_name']}"
+            run = self.store.start_run(
+                request["job_name"], request["step_name"], int(request["attempt"]),
+                details=base_details,
+            )
+            self.store.finish_run(
+                run["id"], status="failed", details=base_details,
+                error=error, alert_status="pending",
+            )
+            dead = self.store.dead_letter_retry_request(request["id"], error)
+            alert_status = self._retry_alert(dead, run["id"], error)
+            return {
+                "retry_request_id": dead["id"],
+                "source_run_id": dead["source_run_id"],
+                "step_name": dead["step_name"],
+                "status": dead["status"],
+                "attempt": dead["attempt"],
+                "run_id": run["id"],
+                "alert_status": alert_status,
+                "error": error,
+            }
+
+        run = self.store.start_run(
+            request["job_name"], step.name, int(request["attempt"]), details=base_details,
+        )
+        try:
+            value = step.action()
+            ok, details, error = self._interpret(value)
+        except Exception as exc:
+            ok = False
+            details = {**base_details, "error_type": type(exc).__name__}
+            error = f"{type(exc).__name__}: {exc}"
+        else:
+            details = self._details(details)
+            if isinstance(details, dict):
+                details = {**base_details, **details}
+
+        if ok:
+            self.store.finish_run(
+                run["id"], status="success", details=details, alert_status="not_needed",
+            )
+            finished = self.store.finish_retry_request(request["id"], success=True)
+            return {
+                "retry_request_id": finished["id"],
+                "source_run_id": finished["source_run_id"],
+                "step_name": finished["step_name"],
+                "status": finished["status"],
+                "attempt": finished["attempt"],
+                "run_id": run["id"],
+                "error": None,
+            }
+
+        self.store.finish_run(
+            run["id"], status="failed", details=details, error=error, alert_status="pending",
+        )
+        finished = self.store.finish_retry_request(
+            request["id"], success=False, error=error,
+        )
+        alert_status = None
+        if finished["status"] == "dead_letter":
+            alert_status = self._retry_alert(finished, run["id"], error or "重试失败")
+        return {
+            "retry_request_id": finished["id"],
+            "source_run_id": finished["source_run_id"],
+            "step_name": finished["step_name"],
+            "status": finished["status"],
+            "attempt": finished["attempt"],
+            "run_id": run["id"],
+            "alert_status": alert_status,
+            "error": error,
+        }
+
+    def consume_retries(
+        self,
+        job_name: Optional[str] = None,
+        *,
+        steps: Optional[Sequence[Any]] = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """消费待执行重试请求；步骤来自 runner 配置，不接受命令参数。"""
+        job = str(job_name or self.job_name)
+        selected = _normalise_steps(steps) if steps is not None else list(self.steps)
+        step_map = {step.name: step for step in selected}
+        pending = self.store.list_retry_requests(
+            job_name=job, status="pending", limit=limit, ascending=True,
+        )
+        results: list[dict[str, Any]] = []
+        dead_letters: list[int] = []
+        for item in pending:
+            claimed = self.store.claim_retry_request(item["id"])
+            if claimed is None:
+                continue
+            result = self._execute_retry_request(claimed, step_map)
+            results.append(result)
+            if result["status"] == "dead_letter":
+                dead_letters.append(int(result["retry_request_id"]))
+        return {
+            "job_name": job,
+            "retries": results,
+            "dead_letters": dead_letters,
+            "exit_code": 1 if dead_letters else 0,
+            "error": "重试请求进入死信队列" if dead_letters else None,
+        }
+
     def _alert(self, event: dict[str, Any]) -> str:
         if self.alerter is None:
             return "not_configured"
@@ -344,9 +478,13 @@ class OpsRunner:
         *,
         steps: Optional[Sequence[Any]] = None,
         fail_fast: Optional[bool] = None,
+        consume_retries: Optional[bool] = None,
     ) -> dict[str, Any]:
         job = str(job_name or self.job_name)
         selected = _normalise_steps(steps) if steps is not None else list(self.steps)
+        should_consume_retries = (
+            self.consume_retries_on_run if consume_retries is None else bool(consume_retries)
+        )
         started_at = now_iso()
         with self._lock(job) as acquired:
             if not acquired:
@@ -358,8 +496,15 @@ class OpsRunner:
                     "started_at": started_at,
                     "finished_at": now_iso(),
                     "steps": [],
+                    "retries": [],
+                    "retry_dead_letters": [],
                 }
 
+            retry_report = (
+                self.consume_retries(job, steps=selected)
+                if should_consume_retries else
+                {"retries": [], "dead_letters": [], "exit_code": 0, "error": None}
+            )
             report: dict[str, Any] = {
                 "job_name": job,
                 "status": "success",
@@ -368,9 +513,11 @@ class OpsRunner:
                 "started_at": started_at,
                 "finished_at": None,
                 "steps": [],
+                "retries": list(retry_report.get("retries") or []),
+                "retry_dead_letters": list(retry_report.get("dead_letters") or []),
             }
-            overall_failed = False
-            first_error: Optional[str] = None
+            overall_failed = bool(retry_report.get("exit_code"))
+            first_error: Optional[str] = retry_report.get("error")
             stop_after_failure = self.fail_fast if fail_fast is None else bool(fail_fast)
 
             for step in selected:

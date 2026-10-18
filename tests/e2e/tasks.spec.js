@@ -6,9 +6,12 @@ test.describe('task evidence and verification', () => {
     const fixtures = loadFixtures();
     await login(page, fixtures.users.employee);
 
-    const taskCard = page.locator('#taskCards .card').first();
+    const readyResponse = await page.request.get('/api/tasks/today?status=ready');
+    const readyTasks = (await readyResponse.json()).tasks || [];
+    expect(readyTasks.length).toBeGreaterThan(0);
+    const title = readyTasks[0].title;
+    const taskCard = page.locator('#taskCards .card').filter({ hasText: title }).first();
     await expect(taskCard).toBeVisible();
-    const title = (await taskCard.locator('.t').textContent()).trim();
     await taskCard.getByRole('button', { name: '接受任务' }).click();
 
     const acceptedCard = page.locator('#taskCards .card').filter({ hasText: title }).first();

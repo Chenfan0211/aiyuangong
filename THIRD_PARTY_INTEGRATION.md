@@ -36,4 +36,6 @@ ACME_EMAIL=
 STORE_AGENT_MFA_KEY=
 ```
 
-代码、接口和本地契约测试已经完成；真实第三方联调属于密钥到位后的验收阶段。
+代码、接口、厂商解密协议和本地 fixture 契约测试已经完成；真实第三方联调属于密钥和域名到位后的验收阶段。
+
+飞书/企微回调已支持真实签名、Encrypt Key / EncodingAESKey 解密、URL challenge 和 receiveid 校验；填入密钥后可替换 fixture 做真实回调验收。

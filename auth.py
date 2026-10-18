@@ -93,6 +93,7 @@ MIN_PASSWORD_LENGTH = 10
 MAX_LOGIN_FAILURES = 5
 LOCK_MINUTES = 15
 SESSION_TTL_HOURS = 12
+ABSOLUTE_SESSION_TTL_DAYS = 7
 MFA_ROLES = frozenset({"owner", "area_manager", "manager"})
 MFA_CHALLENGE_MINUTES = 5
 PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d)\d{4}(\d{4})(?!\d)")
@@ -245,6 +246,7 @@ class SecurityContext:
     expires_at: str = ""
     permissions: frozenset[str] = field(default_factory=frozenset)
     mfa_enrollment_required: bool = False
+    must_change_password: bool = False
 
     @property
     def role_label(self) -> str:
@@ -283,6 +285,8 @@ class AuthStore:
         with self._connection() as conn:
             for table in ("users", "memberships", "auth_sessions", "audit_events", "user_mfa", "mfa_challenges"):
                 self.db.ensure_tenant_column(conn, table)
+            self.db.add_column_if_missing(conn, "users", "must_change_password", "must_change_password integer not null default 0")
+            self.db.add_column_if_missing(conn, "auth_sessions", "absolute_expires_at", "absolute_expires_at text not null default ''")
 
     def _connection(self):
         """统一走 Database：提交/回滚后必定关闭连接（详见 db.py）。"""
@@ -312,6 +316,7 @@ class AuthStore:
                   status text not null default 'active',
                   created_at text not null,
                   password_changed_at text not null,
+                  must_change_password integer not null default 0,
                   last_login_at text,
                   unique (tenant_id, username)
                 );
@@ -335,6 +340,7 @@ class AuthStore:
                   role text not null,
                   created_at text not null,
                   expires_at text not null,
+                  absolute_expires_at text not null,
                   last_seen_at text not null,
                   revoked_at text,
                   revoked_reason text
@@ -402,6 +408,7 @@ class AuthStore:
         tenant_id: str,
         store_id: str,
         user_id: Optional[str] = None,
+        must_change_password: bool = False,
     ) -> dict[str, Any]:
         username = (username or "").strip()
         if not username:
@@ -420,9 +427,10 @@ class AuthStore:
                 raise AuthError(f"用户已存在：{username}")
             conn.execute(
                 """insert into users(user_id,tenant_id,username,display_name,password_algo,password_salt,
-                   password_hash,status,created_at,password_changed_at)
-                   values(?,?,?,?,?,?,?,?,?,?)""",
-                (user_id, tenant_id, username, display_name, algo, salt, digest, "active", moment, moment),
+                   password_hash,status,created_at,password_changed_at,must_change_password)
+                   values(?,?,?,?,?,?,?,?,?,?,?)""",
+                (user_id, tenant_id, username, display_name, algo, salt, digest, "active", moment, moment,
+                 bool(must_change_password) if self.db.dialect == "postgresql" else int(must_change_password)),
             )
             conn.execute(
                 """insert into memberships(tenant_id,store_id,user_id,role,status,created_at)
@@ -435,9 +443,11 @@ class AuthStore:
             after={"username": username, "role": role},
         )
         return {"user_id": user_id, "username": username, "display_name": display_name,
-                "role": role, "tenant_id": tenant_id, "store_id": store_id}
+                "role": role, "tenant_id": tenant_id, "store_id": store_id,
+                "must_change_password": bool(must_change_password)}
 
-    def set_password(self, user_id: str, new_password: str, actor_id: str = "system") -> None:
+    def set_password(self, user_id: str, new_password: str, actor_id: str = "system",
+                     must_change_password: bool = False) -> None:
         with self._connection() as conn:
             row = conn.execute("select username from users where user_id=?", (user_id,)).fetchone()
             if not row:
@@ -445,9 +455,11 @@ class AuthStore:
             validate_password(new_password, row["username"])
             algo, salt, digest = hash_password(new_password)
             conn.execute(
-                """update users set password_algo=?, password_salt=?, password_hash=?, password_changed_at=?
-                   where user_id=?""",
-                (algo, salt, digest, now_iso(), user_id),
+                """update users set password_algo=?, password_salt=?, password_hash=?, password_changed_at=?,
+                   must_change_password=? where user_id=?""",
+                (algo, salt, digest, now_iso(),
+                 bool(must_change_password) if self.db.dialect == "postgresql" else int(must_change_password),
+                 user_id),
             )
             conn.execute(
                 "update auth_sessions set revoked_at=?, revoked_reason=? where user_id=? and revoked_at is null",
@@ -456,9 +468,21 @@ class AuthStore:
         self.record_audit(event_type="password_changed", actor_type="user", actor_id=actor_id,
                           object_type="user", object_id=user_id)
 
+    def change_password(self, user_id: str, current_password: str, new_password: str) -> None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "select username,password_algo,password_salt,password_hash from users where user_id=?",
+                (user_id,),
+            ).fetchone()
+        if not row or not verify_password(current_password, row["password_algo"], row["password_salt"],
+                                         row["password_hash"]):
+            raise CredentialsError("当前口令不正确")
+        validate_password(new_password, row["username"])
+        self.set_password(user_id, new_password, actor_id=user_id, must_change_password=False)
+
     def list_users(self, tenant_id: str, store_id: Optional[str] = None) -> list[dict[str, Any]]:
         sql = """select u.user_id,u.username,u.display_name,u.status,u.last_login_at,
-                        m.store_id,m.role,m.status as membership_status
+                        u.must_change_password,m.store_id,m.role,m.status as membership_status
                  from users u join memberships m on m.user_id=u.user_id
                  where u.tenant_id=?"""
         params: list[Any] = [tenant_id]
@@ -469,6 +493,75 @@ class AuthStore:
         with self._connection() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+
+    def set_user_status(self, user_id: str, status: str, actor_id: str = "system") -> dict[str, Any]:
+        if status not in {"active", "disabled"}:
+            raise AuthError("用户状态只能是 active 或 disabled")
+        with self._connection() as conn:
+            row = conn.execute("select user_id,status from users where user_id=?", (user_id,)).fetchone()
+            if not row:
+                raise AuthError(f"用户不存在：{user_id}")
+            conn.execute("update users set status=? where user_id=?", (status, user_id))
+            if status != "active":
+                conn.execute(
+                    "update auth_sessions set revoked_at=?, revoked_reason='user_disabled' "
+                    "where user_id=? and revoked_at is null",
+                    (now_iso(), user_id),
+                )
+        self.record_audit(event_type="user_status_changed", actor_type="user", actor_id=actor_id,
+                          object_type="user", object_id=user_id, after={"status": status})
+        return {"user_id": user_id, "status": status}
+
+    def update_membership(self, tenant_id: str, store_id: str, user_id: str, *, role: Optional[str] = None,
+                          display_name: Optional[str] = None, status: Optional[str] = None,
+                          actor_id: str = "system") -> dict[str, Any]:
+        if role is not None and role not in ROLES:
+            raise AuthError(f"未知角色：{role}")
+        if status is not None and status not in {"active", "disabled"}:
+            raise AuthError("成员状态只能是 active 或 disabled")
+        with self._connection() as conn:
+            row = conn.execute(
+                "select u.user_id,u.display_name,m.role,m.status from users u join memberships m "
+                "on m.user_id=u.user_id where u.user_id=? and u.tenant_id=? and m.store_id=?",
+                (user_id, tenant_id, store_id),
+            ).fetchone()
+            if not row:
+                raise AuthError(f"成员不存在：{user_id}")
+            before = dict(row)
+            if display_name is not None:
+                conn.execute("update users set display_name=? where user_id=?", (display_name, user_id))
+            if role is not None or status is not None:
+                conn.execute(
+                    "update memberships set role=coalesce(?,role),status=coalesce(?,status) "
+                    "where tenant_id=? and store_id=? and user_id=?",
+                    (role, status, tenant_id, store_id, user_id),
+                )
+            if status == "disabled":
+                conn.execute(
+                    "update auth_sessions set revoked_at=?, revoked_reason='membership_disabled' "
+                    "where user_id=? and revoked_at is null",
+                    (now_iso(), user_id),
+                )
+            updated = conn.execute(
+                "select u.user_id,u.username,u.display_name,u.status,m.role,m.status as membership_status "
+                "from users u join memberships m on m.user_id=u.user_id "
+                "where u.user_id=? and u.tenant_id=? and m.store_id=?",
+                (user_id, tenant_id, store_id),
+            ).fetchone()
+        self.record_audit(event_type="membership_updated", actor_type="user", actor_id=actor_id,
+                          tenant_id=tenant_id, store_id=store_id, object_type="user", object_id=user_id,
+                          before=before, after=dict(updated))
+        return dict(updated)
+
+    def count_active_owners(self, tenant_id: str, store_id: str) -> int:
+        with self._connection() as conn:
+            row = conn.execute(
+                "select count(*) as n from users u join memberships m on m.user_id=u.user_id "
+                "where u.tenant_id=? and m.store_id=? and m.role='owner' "
+                "and u.status='active' and m.status='active'",
+                (tenant_id, store_id),
+            ).fetchone()
+        return int(row["n"])
 
     def _membership(self, username: str, store_id: Optional[str]) -> dict[str, Any]:
         with self._connection() as conn:
@@ -650,13 +743,15 @@ class AuthStore:
         token = secrets.token_urlsafe(32)
         moment = datetime.now()
         expires = moment + timedelta(hours=self.session_ttl_hours)
+        absolute_expires = moment + timedelta(days=ABSOLUTE_SESSION_TTL_DAYS)
         with self._connection() as conn:
             conn.execute(
                 """insert into auth_sessions(token_hash,user_id,tenant_id,store_id,role,created_at,
-                   expires_at,last_seen_at) values(?,?,?,?,?,?,?,?)""",
+                   expires_at,absolute_expires_at,last_seen_at) values(?,?,?,?,?,?,?,?,?)""",
                 (hash_token(token), row["user_id"], membership["tenant_id"], membership["store_id"],
                  membership["role"], moment.isoformat(timespec="seconds"),
-                 expires.isoformat(timespec="seconds"), moment.isoformat(timespec="seconds")),
+                 expires.isoformat(timespec="seconds"), absolute_expires.isoformat(timespec="seconds"),
+                 moment.isoformat(timespec="seconds")),
             )
             conn.execute("update users set last_login_at=? where user_id=?",
                          (moment.isoformat(timespec="seconds"), row["user_id"]))
@@ -666,6 +761,7 @@ class AuthStore:
             session_id=hash_token(token)[:12], expires_at=expires.isoformat(timespec="seconds"),
             permissions=permissions_for(membership["role"]),
             mfa_enrollment_required=self.mfa_required_for(membership["role"]) and not self.is_mfa_enabled(row["user_id"]),
+            must_change_password=bool(row["must_change_password"]),
         )
         self.record_audit(event_type="login_success", actor_type="user", actor_id=row["user_id"],
                           tenant_id=membership["tenant_id"], store_id=membership["store_id"],
@@ -724,17 +820,26 @@ class AuthStore:
                 raise SessionInvalid("会话无效或已退出")
             if row["expires_at"] <= moment.isoformat(timespec="seconds"):
                 raise SessionInvalid("会话已过期，请重新登录")
-            # 滑动续期：剩余不足一半时延长
+            absolute_raw = row["absolute_expires_at"] if "absolute_expires_at" in row.keys() else ""
+            absolute = datetime.fromisoformat(absolute_raw) if absolute_raw else datetime.fromisoformat(row["expires_at"])
+            if absolute <= moment:
+                raise SessionInvalid("会话已达最长有效期，请重新登录")
+            # 滑动续期：剩余不足一半时延长，但绝不能超过绝对有效期
             expires = datetime.fromisoformat(row["expires_at"])
             ttl = timedelta(hours=self.session_ttl_hours)
             if expires - moment < ttl / 2:
-                expires = moment + ttl
-                conn.execute("update auth_sessions set expires_at=?, last_seen_at=? where token_hash=?",
-                             (expires.isoformat(timespec="seconds"), moment.isoformat(timespec="seconds"), token_hash))
+                expires = min(moment + ttl, absolute)
+                conn.execute(
+                    "update auth_sessions set expires_at=?, last_seen_at=? where token_hash=?",
+                    (expires.isoformat(timespec="seconds"), moment.isoformat(timespec="seconds"), token_hash),
+                )
             else:
                 conn.execute("update auth_sessions set last_seen_at=? where token_hash=?",
                              (moment.isoformat(timespec="seconds"), token_hash))
-            user = conn.execute("select status,display_name from users where user_id=?", (row["user_id"],)).fetchone()
+            user = conn.execute(
+                "select status,display_name,must_change_password from users where user_id=?",
+                (row["user_id"],),
+            ).fetchone()
         if not user or user["status"] != "active":
             raise SessionInvalid("账号已被停用")
         return SecurityContext(
@@ -742,6 +847,7 @@ class AuthStore:
             display_name=user["display_name"], session_id=token_hash[:12],
             expires_at=expires.isoformat(timespec="seconds"), permissions=permissions_for(row["role"]),
             mfa_enrollment_required=self.mfa_required_for(row["role"]) and not self.is_mfa_enabled(row["user_id"]),
+            must_change_password=bool(user["must_change_password"]),
         )
 
     def logout(self, token: str, reason: str = "user_logout") -> bool:

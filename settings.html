@@ -19,8 +19,25 @@
         <label>月度有效评价目标<input id="targetQualified" type="number" min="0" required /></label>
         <label>数据新鲜度阈值（天）<input id="freshDays" type="number" min="1" max="30" required /></label>
         <label>差评 SLA（小时）<input id="slaHours" type="number" min="1" max="72" required /></label>
+        <label>店长<input id="personManager" required /></label>
+        <label>评价执行人<input id="personReview" required /></label>
+        <label>线上运营<input id="personOnline" required /></label>
+        <label>区域负责人<input id="personArea" required /></label>
+        <label>套餐转化下限<input id="packageConversionFloor" type="number" min="0" max="1" step="0.001" required /></label>
+        <label>套餐最小访问量<input id="packageMinViews" type="number" min="1" required /></label>
+        <label>套餐毛利下限<input id="packageMarginFloor" type="number" min="0" max="1" step="0.001" required /></label>
+        <label>跳变告警阈值（%）<input id="jumpAlertPercent" type="number" min="1" max="1000" required /></label>
+        <div style="grid-column:1/-1"><h3>套餐成本</h3><div id="packageCosts"></div><button id="addPackageCost" type="button" class="ghost">新增套餐成本</button></div>
+        <div style="grid-column:1/-1"><h3>数据保留期（天）</h3><div id="retentionFields" class="form"></div></div>
         <button type="submit">保存配置</button>
       </form>
+    </section>
+    <section>
+      <div class="section-head"><h2>运维运行</h2><button id="refreshOps" class="ghost" type="button">刷新</button></div>
+      <h3>最近运行</h3>
+      <div class="scroll"><table><thead><tr><th>任务</th><th>步骤</th><th>状态</th><th>次数</th><th>告警</th><th>时间</th><th>操作</th></tr></thead><tbody id="opsRunBody"></tbody></table></div>
+      <h3>重试队列</h3>
+      <div class="scroll"><table><thead><tr><th>来源</th><th>步骤</th><th>状态</th><th>次数</th><th>请求人</th></tr></thead><tbody id="retryBody"></tbody></table></div>
     </section>
     <section>
       <div class="section-head"><h2>成员</h2><button id="refreshMembers" class="ghost" type="button">刷新</button></div>

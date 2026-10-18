@@ -289,6 +289,7 @@ create table if not exists users (
   password_salt text not null,
   password_hash text not null,
   status text not null default 'active',
+  must_change_password boolean not null default false,
   created_at timestamptz not null,
   password_changed_at timestamptz not null,
   last_login_at timestamptz,
@@ -314,6 +315,7 @@ create table if not exists auth_sessions (
   role text not null,
   created_at timestamptz not null,
   expires_at timestamptz not null,
+  absolute_expires_at timestamptz not null,
   last_seen_at timestamptz not null,
   revoked_at timestamptz,
   revoked_reason text

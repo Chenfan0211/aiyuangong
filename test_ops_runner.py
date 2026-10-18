@@ -18,7 +18,7 @@ from ops_runner import (
     OpsRunner,
     Step,
 )
-from ops_store import OpsStore
+from ops_store import OpsStore, OpsStoreError
 
 try:
     import pgserver
@@ -60,6 +60,45 @@ class OpsStoreTests(unittest.TestCase):
         listed = store.list_runs(job_name="daily_sync")
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["id"], run["id"])
+
+    def test_retry_request_public_lifecycle_records_source_step_and_attempt(self):
+        store = OpsStore(self.db, tenant_id="tenant-1", store_id="WH-LION-001")
+        source = store.record_run(
+            "daily_sync", "import", status="failed", error="network down",
+            details={"source": "test"},
+        )
+
+        queued = store.request_retry(source["id"], requested_by="owner-1")
+
+        self.assertEqual(queued["source_run_id"], source["id"])
+        self.assertEqual(queued["job_name"], "daily_sync")
+        self.assertEqual(queued["step_name"], "import")
+        self.assertEqual(queued["requested_by"], "owner-1")
+        self.assertEqual(queued["status"], "pending")
+        self.assertEqual(queued["attempt"], 0)
+        self.assertIsNone(queued["dead_letter_at"])
+
+        claimed = store.claim_retry_request(queued["id"])
+        self.assertEqual(claimed["status"], "running")
+        self.assertEqual(claimed["attempt"], 1)
+        self.assertIsNotNone(claimed["started_at"])
+
+        failed = store.finish_retry_request(
+            queued["id"], success=False, error="still down",
+        )
+        self.assertEqual(failed["status"], "pending")
+        self.assertEqual(failed["attempt"], 1)
+        self.assertIn("still down", failed["last_error"])
+        self.assertEqual(store.list_retry_requests(status="pending")[0]["id"], queued["id"])
+
+    def test_retry_request_rejects_unknown_or_successful_source(self):
+        store = OpsStore(self.db, tenant_id="tenant-1", store_id="WH-LION-001")
+        with self.assertRaises(OpsStoreError):
+            store.request_retry(9999, requested_by="owner-1")
+
+        source = store.record_run("daily_sync", "backup", status="success")
+        with self.assertRaises(OpsStoreError):
+            store.request_retry(source["id"], requested_by="owner-1")
 
 
 class OpsRunnerTests(unittest.TestCase):
@@ -199,6 +238,118 @@ class OpsRunnerTests(unittest.TestCase):
             ("backup", "import", "data-quality", "plan", "notify", "summary"),
         )
 
+    def test_retry_request_executes_only_configured_step_and_records_success(self):
+        source = self.store.record_run("daily_sync", "import", status="failed", error="network")
+        queued = self.store.request_retry(source["id"], requested_by="owner-1")
+        calls = []
+
+        def import_action():
+            calls.append("import")
+            return {"rows": 3}
+
+        runner = OpsRunner(
+            self.store,
+            steps=[Step("import", import_action)],
+            lock_path=self.root / "daily.lock",
+        )
+        report = runner.consume_retries(job_name="daily_sync")
+
+        self.assertEqual(report["exit_code"], 0)
+        self.assertEqual(calls, ["import"])
+        retry = self.store.get_retry_request(queued["id"])
+        self.assertEqual(retry["status"], "succeeded")
+        self.assertEqual(retry["attempt"], 1)
+        self.assertIsNone(retry["dead_letter_at"])
+        retry_runs = [
+            row for row in self.store.list_runs(job_name="daily_sync")
+            if row["details"].get("retry_request_id") == queued["id"]
+        ]
+        self.assertEqual(len(retry_runs), 1)
+        self.assertEqual(retry_runs[0]["step_name"], "import")
+        self.assertEqual(retry_runs[0]["details"]["source_run_id"], source["id"])
+
+    def test_retry_request_for_unconfigured_step_dead_letters_without_action(self):
+        source = self.store.record_run(
+            "daily_sync", "data-quality", status="failed", error="missing data",
+        )
+        queued = self.store.request_retry(source["id"], requested_by="owner-1")
+
+        runner = OpsRunner(
+            self.store,
+            steps=[Step("import", lambda: self.fail("retry must not run arbitrary action"))],
+            lock_path=self.root / "daily.lock",
+        )
+        report = runner.consume_retries(job_name="daily_sync")
+
+        self.assertNotEqual(report["exit_code"], 0)
+        self.assertEqual(report["dead_letters"], [queued["id"]])
+        retry = self.store.get_retry_request(queued["id"])
+        self.assertEqual(retry["status"], "dead_letter")
+        self.assertEqual(retry["attempt"], 1)
+        self.assertIsNotNone(retry["dead_letter_at"])
+        self.assertIn("未配置", retry["last_error"])
+
+    def test_retry_request_dead_letters_after_attempt_limit_and_alerts(self):
+        source = self.store.record_run("daily_sync", "backup", status="failed", error="disk full")
+        queued = self.store.request_retry(source["id"], requested_by="owner-1", max_attempts=2)
+        calls = []
+        alerts = []
+
+        class SpyAlerter:
+            def send(self, event):
+                alerts.append(event)
+                return {"sent": True, "channel": "spy"}
+
+        def failing_backup():
+            calls.append(1)
+            raise RuntimeError("disk still full")
+
+        runner = OpsRunner(
+            self.store,
+            steps=[Step("backup", failing_backup)],
+            alerter=SpyAlerter(),
+            lock_path=self.root / "daily.lock",
+        )
+
+        first = runner.consume_retries(job_name="daily_sync")
+        first_retry = self.store.get_retry_request(queued["id"])
+        self.assertEqual(first["exit_code"], 0)
+        self.assertEqual(first_retry["status"], "pending")
+        self.assertEqual(first_retry["attempt"], 1)
+
+        second = runner.consume_retries(job_name="daily_sync")
+        second_retry = self.store.get_retry_request(queued["id"])
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotEqual(second["exit_code"], 0)
+        self.assertEqual(second["dead_letters"], [queued["id"]])
+        self.assertEqual(second_retry["status"], "dead_letter")
+        self.assertEqual(second_retry["attempt"], 2)
+        self.assertIsNotNone(second_retry["dead_letter_at"])
+        self.assertEqual(alerts[0]["status"], "dead_letter")
+        self.assertEqual(alerts[0]["retry_request_id"], queued["id"])
+
+    def test_run_consumes_pending_retry_before_regular_steps(self):
+        source = self.store.record_run("daily_sync", "import", status="failed", error="network")
+        self.store.request_retry(source["id"], requested_by="owner-1")
+        calls = []
+
+        def import_action():
+            calls.append("call")
+            return {"ok": True}
+
+        runner = OpsRunner(
+            self.store,
+            steps=[Step("import", import_action)],
+            lock_path=self.root / "daily.lock",
+        )
+        report = runner.run(job_name="daily_sync")
+
+        self.assertEqual(report["status"], "success")
+        self.assertEqual(len(report["retries"]), 1)
+        self.assertEqual(report["retries"][0]["status"], "succeeded")
+        self.assertEqual(calls, ["call", "call"])
+
 
 class DailySyncScriptTests(unittest.TestCase):
     def test_script_exposes_fixed_order_and_four_notification_kinds(self):
@@ -225,6 +376,39 @@ class DailySyncScriptTests(unittest.TestCase):
             tuple(step.name for step in build_default_steps(args)),
             DEFAULT_STEP_NAMES,
         )
+
+    def test_backup_commands_include_daily_and_monthly_retention_prune(self):
+        from scripts.daily_sync import build_backup_commands
+
+        args = SimpleNamespace(
+            python=sys.executable,
+            config=Path("store_config.json"),
+            metrics_db="data/platform_metrics.db",
+            store_db="data/store_ops.db",
+            tenant_id="tenant-1",
+            store_id="WH-LION-001",
+            inbox=Path("imports/inbox"),
+            backup_dir=Path("data/backup"),
+            days=30,
+            allow_degraded=False,
+            include_financial=False,
+            base_url="http://127.0.0.1:8766",
+        )
+
+        commands = [list(command) for command in build_backup_commands(args)]
+        prune_daily = [
+            command for command in commands
+            if "prune" in command and "daily" in command and "30" in command
+        ]
+        prune_monthly = [
+            command for command in commands
+            if "prune" in command and "monthly" in command and "12" in command
+        ]
+
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(len(prune_daily), 1)
+        self.assertEqual(len(prune_monthly), 1)
+        self.assertIn("backup_manager.py", commands[0][1])
 
 
 @unittest.skipUnless(HAS_PG, "需要 pgserver 才能验证 PostgreSQL advisory lock")

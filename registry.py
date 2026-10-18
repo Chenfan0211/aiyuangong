@@ -113,6 +113,21 @@ class RegistryStore:
             ).fetchone()
         return row["updated_at"] if row else None
 
+    def import_config(self, config: dict[str, Any], force: bool = False) -> dict[str, Any]:
+        """Explicitly import a configuration file into the registry.
+
+        Ordinary runtime entry points must use :meth:`effective_config`; this
+        method is only for ``config-import`` and requires ``force=True`` when a
+        database configuration already exists.
+        """
+        tenant_id = str(config.get("tenant_id") or "")
+        store_id = str(config.get("store_id") or "")
+        if not tenant_id or not store_id:
+            raise RegistryError("门店配置缺少 tenant_id 或 store_id")
+        if not force and self.store_config(tenant_id, store_id) is not None:
+            raise RegistryError("数据库中已存在门店配置；如需覆盖请使用 config-import --force")
+        return self.register(config)
+
     def effective_config(self, file_config: dict[str, Any]) -> dict[str, Any]:
         """Return the database config; import the file only when the database has none."""
         tenant_id = str(file_config.get("tenant_id") or "")

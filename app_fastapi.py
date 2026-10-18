@@ -77,6 +77,23 @@ def _approval_callback_secret(provider: str) -> str:
     return ""
 
 
+def _migration_readiness(ctx: "AppContext") -> tuple[bool, str]:
+    db = ctx.registry.db
+    if db.dialect != "postgresql":
+        return True, "sqlite"
+    try:
+        import psycopg
+        from pg_sync import MIGRATIONS, read_migration_state
+        with psycopg.connect(db.target) as pg:
+            applied = {int(row["version"]) for row in read_migration_state(pg)}
+        pending = [migration.version for migration in MIGRATIONS if migration.version not in applied]
+        if pending:
+            return False, "pending migrations: " + ",".join(str(item) for item in pending)
+        return True, "migrations current"
+    except Exception as exc:
+        return False, f"migration check failed: {exc}"
+
+
 def validate_startup(host: str, auth_mode: str) -> None:
     """Reject combinations that would expose demo identity spoofing to the network."""
     if auth_mode == "demo" and host not in LOOPBACK_HOSTS:
@@ -111,6 +128,17 @@ class EvidenceRequest(BaseModel):
 class FeedbackRequest(BaseModel):
     decision: str = Field(..., description="accepted / rejected / false_positive")
     reason: str = Field("", max_length=1000)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=200)
+    new_password: str = Field(..., min_length=10, max_length=200)
+
+
+class MemberUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(None, min_length=1, max_length=40)
+    role: Optional[str] = None
+    status: Optional[str] = None
 
 
 class ConfigPatchRequest(BaseModel):
@@ -211,6 +239,11 @@ def create_app(
     )
     app.state.ctx = ctx
 
+    if _is_production():
+        migration_ok, migration_status = _migration_readiness(ctx)
+        if not migration_ok:
+            raise RuntimeError(f"数据库迁移未就绪：{migration_status}")
+
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
     @app.middleware("http")
@@ -254,7 +287,12 @@ def create_app(
     def readyz():
         try:
             ctx.task_store.list_tasks(ctx.store_id, limit=1)
-            return {"status": "ready", "database": "ok"}
+            migration_ok, migration_status = _migration_readiness(ctx)
+            if not migration_ok:
+                return JSONResponse(status_code=503, content={"status": "not_ready",
+                                                              "database": "ok",
+                                                              "migrations": migration_status})
+            return {"status": "ready", "database": "ok", "migrations": migration_status}
         except Exception as exc:
             return JSONResponse(status_code=503, content={"status": "not_ready", "error": str(exc)})
 
@@ -301,8 +339,12 @@ def create_app(
     def require(permission: Optional[str] = None):
         def dependency(request: Request, context: SecurityContext = Depends(current_context)) -> SecurityContext:
             allowed_mfa = request.url.path.startswith("/api/auth/mfa/") or request.url.path in {
-                "/api/auth/me", "/api/auth/logout",
+                "/api/auth/me", "/api/auth/logout", "/api/auth/password",
             }
+            if context.must_change_password and request.url.path not in {
+                "/api/auth/password", "/api/auth/me", "/api/auth/logout",
+            } and not request.url.path.startswith("/api/auth/mfa/"):
+                raise HTTPException(status_code=403, detail="必须先修改临时口令")
             if context.mfa_enrollment_required and not allowed_mfa:
                 raise HTTPException(status_code=403, detail="必须先完成 MFA 绑定")
             if permission and not context.has(permission):
@@ -330,6 +372,7 @@ def create_app(
             "user": context.to_user_dict(), "tenant_id": context.tenant_id, "store_id": context.store_id,
             "permissions": sorted(context.permissions),
             "mfa_enrollment_required": context.mfa_enrollment_required,
+            "must_change_password": context.must_change_password,
         }
 
     def _set_session_cookie(response: Response, token: str, expires_at: str) -> None:
@@ -365,6 +408,18 @@ def create_app(
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         _set_session_cookie(response, result["token"], result["expires_at"])
         return _session_payload(result)
+
+    @app.post("/api/auth/password", tags=["认证"], summary="修改当前账号口令")
+    def change_password(payload: PasswordChangeRequest,
+                        context: SecurityContext = Depends(require())) -> dict[str, Any]:
+        try:
+            ctx.auth.change_password(context.user_id, payload.current_password, payload.new_password)
+        except (AuthError, CredentialsError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="password_changed", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="user", object_id=context.user_id)
+        return {"changed": True, "sessions_revoked": True}
 
     @app.post("/api/auth/mfa/setup", tags=["认证"], summary="开始绑定 TOTP")
     def mfa_setup(context: SecurityContext = Depends(require())) -> dict[str, str]:
@@ -406,26 +461,46 @@ def create_app(
             "user": context.to_user_dict(), "tenant_id": context.tenant_id, "store_id": context.store_id,
             "session_id": context.session_id, "expires_at": context.expires_at,
             "permissions": sorted(context.permissions),
+            "mfa_enrollment_required": context.mfa_enrollment_required,
+            "must_change_password": context.must_change_password,
         }
+
+    def _approval_webhook_adapter(provider: str):
+        secret = _approval_callback_secret(provider)
+        if not secret:
+            raise HTTPException(status_code=503, detail="审批回调密钥尚未配置")
+        return create_approval_callback_adapter(
+            provider, secret=secret, db_target=ctx.registry.db.target,
+            approval_store=ctx.approvals, task_store=ctx.task_store,
+            tenant_id=str(ctx.config.get("tenant_id") or ""), store_id=ctx.store_id,
+            decision_applier=lambda approval_id, decision, actor, reason: apply_decision(
+                ctx.approvals, ctx.task_store, approval_id, decision, actor, reason),
+        )
+
+    @app.get("/api/webhooks/approvals/{provider}", tags=["治理"], summary="审批回调 URL 验证")
+    async def approval_webhook_verify(provider: str, request: Request):
+        normalized = str(provider or "").lower()
+        if normalized not in {"mock", "feishu", "wecom"}:
+            raise HTTPException(status_code=404, detail="不支持的审批回调提供方")
+        adapter = _approval_webhook_adapter(normalized)
+        routing = {**dict(request.headers), **dict(request.query_params)}
+        try:
+            result = adapter.handle(b"", routing)
+        except ApprovalCallbackError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.reason) from exc
+        challenge = str(result.get("echostr") or result.get("challenge") or "")
+        return PlainTextResponse(challenge) if normalized == "wecom" else result
 
     @app.post("/api/webhooks/approvals/{provider}", tags=["治理"], summary="审批回调（签名、nonce、幂等）")
     async def approval_webhook(provider: str, request: Request) -> dict[str, Any]:
         normalized = str(provider or "").lower()
         if normalized not in {"mock", "feishu", "wecom"}:
             raise HTTPException(status_code=404, detail="不支持的审批回调提供方")
-        secret = _approval_callback_secret(normalized)
-        if not secret:
-            raise HTTPException(status_code=503, detail="审批回调密钥尚未配置")
+        adapter = _approval_webhook_adapter(normalized)
         body = await request.body()
-        adapter = create_approval_callback_adapter(
-            normalized, secret=secret, db_target=ctx.registry.db.target,
-            approval_store=ctx.approvals, task_store=ctx.task_store,
-            tenant_id=str(ctx.config.get("tenant_id") or ""), store_id=ctx.store_id,
-            decision_applier=lambda approval_id, decision, actor, reason: apply_decision(
-                ctx.approvals, ctx.task_store, approval_id, decision, actor, reason),
-        )
+        routing = {**dict(request.headers), **dict(request.query_params)}
         try:
-            result = adapter.handle(body, dict(request.headers))
+            result = adapter.handle(body, routing)
         except ApprovalCallbackError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.reason) from exc
         ctx.auth.record_audit(event_type="approval_callback", actor_type="external", actor_id=normalized,
@@ -470,7 +545,8 @@ def create_app(
         temporary = secrets.token_urlsafe(12)
         try:
             member = ctx.auth.create_user(payload.username, temporary, payload.display_name, payload.role,
-                                          context.tenant_id, context.store_id)
+                                          context.tenant_id, context.store_id,
+                                          must_change_password=True)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         ctx.auth.record_audit(event_type="member_created", actor_type="user", actor_id=context.user_id,
@@ -478,12 +554,49 @@ def create_app(
                               object_type="user", object_id=member["user_id"], after={"role": payload.role})
         return {"member": member, "temporary_password": temporary}
 
+    @app.patch("/api/admin/members/{user_id}", tags=["管理"], summary="修改成员姓名、角色或状态")
+    def admin_member_update(user_id: str, payload: MemberUpdateRequest,
+                            context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        current = next((row for row in ctx.auth.list_users(context.tenant_id, context.store_id)
+                        if row["user_id"] == user_id), None)
+        if current is None:
+            raise HTTPException(status_code=404, detail="成员不存在")
+        loses_owner = current["role"] == "owner" and ((payload.role or current["role"]) != "owner"
+                                                     or (payload.status or current["membership_status"]) != "active")
+        if loses_owner and ctx.auth.count_active_owners(context.tenant_id, context.store_id) <= 1:
+            raise HTTPException(status_code=409, detail="不能停用或降级最后一个 owner")
+        try:
+            member = ctx.auth.update_membership(
+                context.tenant_id, context.store_id, user_id,
+                role=payload.role, display_name=payload.display_name, status=payload.status,
+                actor_id=context.user_id,
+            )
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"member": member}
+
+    @app.post("/api/admin/members/{user_id}/status", tags=["管理"], summary="启用或停用成员")
+    def admin_member_status(user_id: str, payload: MemberUpdateRequest,
+                            context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        current = next((row for row in ctx.auth.list_users(context.tenant_id, context.store_id)
+                        if row["user_id"] == user_id), None)
+        if current is None:
+            raise HTTPException(status_code=404, detail="成员不存在")
+        if payload.status not in {"active", "disabled"}:
+            raise HTTPException(status_code=400, detail="状态必须是 active 或 disabled")
+        if current["role"] == "owner" and payload.status == "disabled" and ctx.auth.count_active_owners(context.tenant_id, context.store_id) <= 1:
+            raise HTTPException(status_code=409, detail="不能停用最后一个 owner")
+        member = ctx.auth.update_membership(context.tenant_id, context.store_id, user_id,
+                                            status=payload.status, actor_id=context.user_id)
+        return {"member": member}
+
     @app.post("/api/admin/members/{user_id}/reset-password", tags=["管理"], summary="重置成员口令")
     def admin_member_reset_password(user_id: str,
                                     context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
         temporary = secrets.token_urlsafe(12)
         try:
-            ctx.auth.set_password(user_id, temporary, actor_id=context.user_id)
+            ctx.auth.set_password(user_id, temporary, actor_id=context.user_id,
+                                  must_change_password=True)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         ctx.auth.record_audit(event_type="member_password_reset", actor_type="user", actor_id=context.user_id,
@@ -506,6 +619,11 @@ def create_app(
                        context: SecurityContext = Depends(require("audit:read"))) -> dict[str, Any]:
         return {"runs": ctx.ops.list_runs(job_name=job_name, limit=limit, ascending=False)}
 
+    @app.get("/api/admin/retries", tags=["管理"], summary="列出运维重试队列")
+    def admin_retries(status: Optional[str] = Query(None),
+                      context: SecurityContext = Depends(require("audit:read"))) -> dict[str, Any]:
+        return {"retries": ctx.ops.list_retry_requests(status=status, limit=200, ascending=False)}
+
     @app.get("/api/admin/ops-runs/{run_id}", tags=["管理"], summary="查看运维任务运行详情")
     def admin_ops_run(run_id: int,
                       context: SecurityContext = Depends(require("audit:read"))) -> dict[str, Any]:
@@ -522,13 +640,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="运行记录不存在")
         if source["status"] not in {"failed", "skipped"}:
             raise HTTPException(status_code=409, detail="只有失败或跳过的任务可以重试")
-        queued = ctx.ops.record_run("daily_sync", "retry-request", status="skipped",
-                                    details={"source_run_id": run_id, "requested_by": context.user_id},
-                                    alert_status="not_needed")
+        queued = ctx.ops.request_retry(run_id, requested_by=context.user_id)
         ctx.auth.record_audit(event_type="ops_retry_requested", actor_type="user", actor_id=context.user_id,
                               tenant_id=context.tenant_id, store_id=context.store_id,
                               object_type="ops_run", object_id=str(run_id))
-        return {"accepted": True, "queued_run": queued}
+        return {"accepted": True, "retry": queued}
 
     # ---------------- 门店与数据 ----------------
 

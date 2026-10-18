@@ -7,6 +7,8 @@
 3. 启动：`docker compose up -d --build`。
 4. 检查：`docker compose ps`、`curl -fsS https://$DOMAIN/livez`、`curl -fsS https://$DOMAIN/readyz`。
 5. 首次建表：`docker compose exec app python pg_sync.py --dsn "$STORE_AGENT_STORE_DB" --config "$STORE_AGENT_CONFIG" init`。
+
+升级顺序固定为：备份 → `pg_sync.py migrate --status` → `migrate --dry-run` → `migrate --apply` → `migrate --verify` → 启动应用。`/readyz` 在存在待迁移版本时返回 503。
 6. 首次导入配置和账号：按 README 使用 `pg_sync.py` 与 `store_cli.py`，生产环境禁止使用 demo 模式。
 7. 每日任务使用主机 cron/systemd timer 调用 `scripts/daily_sync.sh`，脚本自带互斥锁（flock）和失败退出码。
 
