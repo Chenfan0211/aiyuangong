@@ -10,8 +10,8 @@
     "area_manager": "区域负责人"
   },
   "review_cycle": {
-    "cycle_start": "2026-09-01",
-    "cycle_end": "2026-09-30",
+    "cycle_start": "2026-10-01",
+    "cycle_end": "2026-10-31",
     "target_qualified_month": 40,
     "daily_invite_cap": null
   },

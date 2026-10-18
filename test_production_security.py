@@ -22,6 +22,23 @@ class StartupGuardTests(unittest.TestCase):
 
 
 class ProductionDocsTests(unittest.TestCase):
+    def test_live_ready_and_metrics_are_public(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            app = app_fastapi.create_app(
+                config_path=Path(app_fastapi.__file__).resolve().parent / "store_config.json",
+                metrics_db=root_path / "metrics.db",
+                store_db=root_path / "store.db",
+                chat_db=root_path / "chat.db",
+            )
+            client = TestClient(app)
+            self.assertEqual(client.get("/livez").json()["status"], "ok")
+            self.assertEqual(client.get("/readyz").status_code, 200)
+            metrics = client.get("/metrics")
+            self.assertEqual(metrics.status_code, 200)
+            self.assertIn("mall_ops_up 1", metrics.text)
+            self.assertIn("x-request-id", {key.lower() for key in metrics.headers})
+
     def test_production_disables_openapi_docs(self):
         old = os.environ.get("STORE_AGENT_ENV")
         os.environ["STORE_AGENT_ENV"] = "production"

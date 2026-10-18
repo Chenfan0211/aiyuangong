@@ -14,12 +14,16 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -35,6 +39,7 @@ from store_agent import AgentSessionStore, OpenAICompatibleResponder, StoreOpera
 from task_store import TaskStore, TaskStoreError
 
 ROOT = Path(__file__).resolve().parent
+ACCESS_LOGGER = logging.getLogger("store_ops.access")
 WRITE_STATUSES = ("accepted", "done", "verified", "rejected", "canceled", "ready")
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -147,6 +152,8 @@ def create_app(
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+        started = time.perf_counter()
         response = await call_next(request)
         csp = ("default-src 'self'; script-src 'self'; style-src 'self'; "
                "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
@@ -155,9 +162,31 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-Request-ID"] = request_id
         if _is_production():
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        ACCESS_LOGGER.info(json.dumps({
+            "event": "http_request", "request_id": request_id, "method": request.method,
+            "path": request.url.path, "status": response.status_code,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+        }, ensure_ascii=False))
         return response
+
+    @app.get("/livez", include_in_schema=False)
+    def livez() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/readyz", include_in_schema=False)
+    def readyz():
+        try:
+            ctx.task_store.list_tasks(ctx.store_id, limit=1)
+            return {"status": "ready", "database": "ok"}
+        except Exception as exc:
+            return JSONResponse(status_code=503, content={"status": "not_ready", "error": str(exc)})
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics() -> PlainTextResponse:
+        return PlainTextResponse("mall_ops_up 1\nmall_ops_store_info{store_id=\"" + ctx.store_id + "\"} 1\n")
 
     # ---------------- 依赖 ----------------
 
@@ -536,6 +565,8 @@ def main() -> None:
     parser.add_argument("--auth-mode", choices=("session", "demo"), default="session")
     args = parser.parse_args()
     validate_startup(args.host, args.auth_mode)
+    logging.basicConfig(level=os.getenv("STORE_AGENT_LOG_LEVEL", "INFO"),
+                        format="%(message)s")
 
     import uvicorn
 
