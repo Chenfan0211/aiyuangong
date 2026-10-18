@@ -176,6 +176,34 @@ def build_snapshot(
             "gross_margin_rate": margin,
         })
 
+    # 4) 规则就绪状态：缺数只阻断依赖该数据的规则，不补零
+    rule_readiness: dict[str, dict[str, str]] = {
+        "review_invite": {"status": "ready", "reason": ""},
+        "negative_review": {"status": "ready", "reason": ""},
+        "package": {"status": "ready", "reason": ""},
+        "overdue": {"status": "ready", "reason": ""},
+    }
+    if day > cycle_end:
+        rule_readiness["review_invite"] = {
+            "status": "blocked",
+            "reason": f"评价周期已于 {cycle_end.isoformat()} 结束，请更新 review_cycle 配置",
+        }
+    elif not yesterday_rows:
+        rule_readiness["review_invite"] = {
+            "status": "blocked",
+            "reason": f"缺少 {yesterday.isoformat()} 的平台核销数据，无法计算评价邀请上限",
+        }
+    if not packages:
+        rule_readiness["package"] = {
+            "status": "degraded",
+            "reason": "近 7 天没有可用套餐明细，已跳过套餐调整规则",
+        }
+    if task_store is None:
+        rule_readiness["overdue"] = {
+            "status": "degraded",
+            "reason": "未接入任务库，已跳过逾期升级规则",
+        }
+
     # 4) 逾期任务 → 升级复核草稿
     if task_store is not None:
         overdue_tasks = task_store.overdue_tasks(store_id)
@@ -199,7 +227,7 @@ def build_snapshot(
             "eligible_review_invites_today": eligible_invites,
             "qualified_reviews_month": len(qualified_reviews),
             "qualified_review_target_month": max(len(qualified_reviews), target_qualified),
-            "days_remaining_in_cycle": max(1, (cycle_end - day).days + 1),
+            "days_remaining_in_cycle": max(0, (cycle_end - day).days + 1),
             "open_negative_reviews": negative_items,
         },
         "packages": packages,
@@ -223,6 +251,7 @@ def build_snapshot(
                 "packages": len(packages),
                 "overdue_tasks": len(overdue_tasks),
             },
+            "rule_readiness": rule_readiness,
             "notes": notes,
         },
     }

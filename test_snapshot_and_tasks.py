@@ -76,6 +76,22 @@ class SnapshotTests(Base):
         self.assertEqual(empty["reviews"]["completed_orders_yesterday"], 0)
         self.assertTrue(any("缺少 2026-09-09 的平台数据" in note for note in empty["_meta"]["notes"]))
 
+    def test_expired_cycle_blocks_review_invite_and_creates_repair_task(self):
+        config = json.loads(json.dumps(CONFIG))
+        snapshot = self.snapshot(day="2026-10-18", config=config)
+        self.assertEqual(snapshot["_meta"]["rule_readiness"]["review_invite"]["status"], "blocked")
+        self.assertFalse(snapshot["_meta"]["rule_readiness"]["review_invite"]["reason"] == "")
+        plan = generate_daily_plan(snapshot)
+        self.assertFalse(any("评价邀请" in task["title"] for task in plan["tasks"]))
+        self.assertTrue(any("补齐" in task["title"] or "数据" in task["title"] for task in plan["tasks"]))
+
+    def test_missing_yesterday_data_marks_rule_degraded_without_zero_fill(self):
+        snapshot = self.snapshot(day="2026-09-10")
+        ready = snapshot["_meta"]["rule_readiness"]["review_invite"]
+        self.assertEqual(ready["status"], "blocked")
+        self.assertIn("缺少", ready["reason"])
+        self.assertEqual(snapshot["reviews"]["completed_orders_yesterday"], 0)
+
     def test_cycle_target_and_remaining_days_come_from_config(self):
         snapshot = self.snapshot()
         self.assertEqual(snapshot["reviews"]["qualified_review_target_month"], 40)

@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = sub.add_parser("plan", help="生成当日计划并落库（幂等）")
     plan.add_argument("--date", default="today", help="today / yesterday / YYYY-MM-DD")
+    plan.add_argument("--allow-degraded", action="store_true", help="允许在缺数/过期周期下生成计划（会写审计）")
+    plan.add_argument("--by", default="ops:cli", help="降级执行的操作者")
 
     tasks = sub.add_parser("tasks", help="查询任务")
     tasks.add_argument("--status", default=None, help="open 或具体状态：proposed/ready/accepted/done/verified/rejected/overdue/canceled")
@@ -196,7 +198,13 @@ def main() -> None:
         elif args.command == "plan":
             snapshot = build_snapshot(config, metrics, args.date, task_store=task_store)
             marked = task_store.mark_overdue(store_id)
-            plan = generate_daily_plan(snapshot)
+            plan = generate_daily_plan(snapshot, allow_degraded=args.allow_degraded)
+            if args.allow_degraded:
+                AuthStore(args.store_db, tenant_id=tenant_id).record_audit(
+                    event_type="plan_allow_degraded", actor_type="user", actor_id=args.by,
+                    tenant_id=tenant_id, store_id=store_id, object_type="plan", object_id=plan["date"],
+                    after={"rule_readiness": snapshot["_meta"].get("rule_readiness", {}),
+                           "notes": snapshot["_meta"].get("notes", [])})
             saved = task_store.save_plan(plan, store_id)
             approval_sync = approvals.sync_from_plan(plan, store_id)
             payload = {
@@ -209,6 +217,7 @@ def main() -> None:
                 "summary": plan["summary"],
                 "guardrails": plan["guardrails"],
                 "snapshot_notes": snapshot["_meta"]["notes"],
+                "rule_readiness": snapshot["_meta"].get("rule_readiness", {}),
                 "snapshot_counts": snapshot["_meta"]["counts"],
                 "tasks": [
                     {

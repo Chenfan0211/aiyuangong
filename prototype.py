@@ -43,12 +43,14 @@ def _task(
     }
 
 
-def generate_daily_plan(snapshot: dict[str, Any]) -> dict[str, Any]:
+def generate_daily_plan(snapshot: dict[str, Any], allow_degraded: bool = False) -> dict[str, Any]:
     """依据透明规则生成每日动作，不调用模型，不产生外部副作用。"""
     store = snapshot["store"]
     date = snapshot["date"]
     owner = snapshot.get("store_manager", "店长")
     rules = snapshot.get("rules", {})
+    readiness = (snapshot.get("_meta") or {}).get("rule_readiness") or {}
+    blocked = {key: value for key, value in readiness.items() if value.get("status") == "blocked"}
     tasks: list[dict[str, Any]] = []
 
     reviews = snapshot.get("reviews", {})
@@ -57,10 +59,12 @@ def generate_daily_plan(snapshot: dict[str, Any]) -> dict[str, Any]:
     current_qualified = max(0, int(reviews.get("qualified_reviews_month", 0)))
     target_qualified = max(current_qualified, int(reviews.get("qualified_review_target_month", current_qualified)))
     days_remaining = max(1, int(reviews.get("days_remaining_in_cycle", 1)))
+    if allow_degraded and days_remaining == 0:
+        days_remaining = 1
     review_gap = max(0, target_qualified - current_qualified)
     invite_target = min(eligible_customers, math.ceil(review_gap / days_remaining))
 
-    if invite_target > 0:
+    if invite_target > 0 and (not blocked.get("review_invite") or allow_degraded):
         tasks.append(
             _task(
                 task_id=f"{date}-review-invite",
@@ -144,6 +148,23 @@ def generate_daily_plan(snapshot: dict[str, Any]) -> dict[str, Any]:
                 evidence=["原任务要求", "截止时间", "员工提交记录", "负责人复核结论"],
                 reason="系统只生成升级草稿；纪律警告和奖惩必须由有权限的管理者确认，且需保留申诉入口。",
                 requires_approval=True,
+            )
+        )
+
+    if blocked and not allow_degraded:
+        reasons = "；".join(f"{name}: {item.get('reason', '数据不可用')}" for name, item in blocked.items())
+        tasks.append(
+            _task(
+                task_id=f"{date}-data-repair",
+                category="management",
+                title="补齐缺失数据并修复配置后重新生成计划",
+                assignee=owner,
+                priority="high",
+                due_at=f"{date}T12:00:00+08:00",
+                target={"blocked_rules": sorted(blocked), "reasons": reasons},
+                evidence=["补导报表文件", "配置修正记录", "重新执行 plan 的结果"],
+                reason=f"系统检测到依赖数据不可用，已跳过相关规则：{reasons}",
+                requires_approval=False,
             )
         )
 
