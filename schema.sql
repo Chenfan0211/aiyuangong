@@ -229,6 +229,40 @@ create table if not exists agent_tool_runs (
 create index if not exists idx_tool_runs_store on agent_tool_runs (tenant_id, store_id, created_at);
 
 -- 推送记录（批次 12）：同一门店/类型/窗口/通道只成功发送一次
+create table if not exists ops_runs (
+  id bigserial primary key,
+  tenant_id text not null default '',
+  store_id text not null default '',
+  job_name text not null,
+  step_name text not null,
+  started_at text not null,
+  finished_at text,
+  status text not null,
+  attempt integer not null default 1,
+  details_json text,
+  error text,
+  alert_status text not null default 'pending',
+  created_at text not null
+);
+create index if not exists idx_ops_runs_scope_job on ops_runs (tenant_id, store_id, job_name, started_at);
+create index if not exists idx_ops_runs_step on ops_runs (job_name, step_name, attempt);
+
+create table if not exists approval_callback_receipts (
+  tenant_id text not null default '',
+  store_id text not null,
+  provider text not null,
+  idempotency_key text not null,
+  approval_id text not null,
+  decision text not null,
+  actor_id text not null,
+  reason text,
+  request_fingerprint text not null,
+  result_json text not null,
+  created_at text not null,
+  primary key (tenant_id, store_id, provider, idempotency_key)
+);
+create index if not exists idx_approval_callback_receipts_approval on approval_callback_receipts (tenant_id, store_id, approval_id);
+
 create table if not exists notifications (
   notification_id text primary key,
   tenant_id text not null default '',
@@ -430,6 +464,13 @@ create policy p_approvals_tenant on approvals using (tenant_id = current_setting
 alter table agent_tool_runs enable row level security;
 drop policy if exists p_agent_tool_runs_tenant on agent_tool_runs;
 create policy p_agent_tool_runs_tenant on agent_tool_runs using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
+alter table ops_runs enable row level security;
+drop policy if exists p_ops_runs_tenant on ops_runs;
+create policy p_ops_runs_tenant on ops_runs using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
+alter table approval_callback_receipts enable row level security;
+drop policy if exists p_approval_callback_receipts_tenant on approval_callback_receipts;
+create policy p_approval_callback_receipts_tenant on approval_callback_receipts using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
+
 alter table notifications enable row level security;
 drop policy if exists p_notifications_tenant on notifications;
 create policy p_notifications_tenant on notifications using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));

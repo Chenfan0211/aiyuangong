@@ -175,6 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     auth_passwd.add_argument("--password-stdin", action="store_true",
                              help="从标准输入读取口令（供脚本/自动化使用）")
 
+    config_import = sub.add_parser("config-import", help="将 JSON 配置导入数据库（首次或人工灾备导入）")
+    config_import.add_argument("--file", type=Path, default=None)
+
+    config_export = sub.add_parser("config-export", help="从数据库导出配置 JSON（灾备）")
+    config_export.add_argument("--out", type=Path, required=True)
+
     auth_audit = sub.add_parser("auth-audit", help="查看身份与权限相关审计事件")
     auth_audit.add_argument("--limit", type=int, default=30)
     auth_audit.add_argument("--event-type", default=None)
@@ -193,7 +199,22 @@ def main() -> None:
         task_store = TaskStore(args.store_db, tenant_id=tenant_id)
         approvals = ApprovalStore(args.store_db, tenant_id=tenant_id)
 
-        if args.command == "snapshot":
+        if args.command == "config-import":
+            source = args.file or args.config
+            imported = load_config(source)
+            registry = RegistryStore(args.store_db, tenant_id=str(imported.get("tenant_id") or ""))
+            registered = registry.register(imported)
+            payload = {"imported": True, "file": str(source), "member": registered,
+                       "revision": registry.current_revision(registered["tenant_id"], registered["store_id"])}
+        elif args.command == "config-export":
+            registry = RegistryStore(args.store_db, tenant_id=tenant_id)
+            exported = registry.store_config(tenant_id, store_id)
+            if exported is None:
+                raise SystemExit("数据库中没有门店配置，请先执行 config-import")
+            args.out.write_text(json.dumps(exported, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            payload = {"exported": True, "path": str(args.out),
+                       "revision": registry.current_revision(tenant_id, store_id)}
+        elif args.command == "snapshot":
             payload = build_snapshot(config, metrics, args.date, task_store=task_store)
         elif args.command == "plan":
             snapshot = build_snapshot(config, metrics, args.date, task_store=task_store)

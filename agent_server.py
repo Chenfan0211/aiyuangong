@@ -32,9 +32,10 @@ import argparse
 import json
 import mimetypes
 import re
+import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 from agent_tools import PermissionDenied, StoreTools
@@ -71,17 +72,20 @@ class AgentHandler(BaseHTTPRequestHandler):
 
     # ---------------- 基础设施 ----------------
 
-    def _headers(self, status: int, content_type: str = "application/json; charset=utf-8") -> None:
+    def _headers(self, status: int, content_type: str = "application/json; charset=utf-8",
+                 extra: Optional[list[tuple[str, str]]] = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        for key, value in extra or []:
+            self.send_header(key, value)
         self.end_headers()
 
-    def _json(self, status: int, payload: dict) -> None:
-        self._headers(status)
+    def _json(self, status: int, payload: dict, extra: Optional[list[tuple[str, str]]] = None) -> None:
+        self._headers(status, extra=extra)
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     def _read_json(self) -> dict:
@@ -112,7 +116,12 @@ class AgentHandler(BaseHTTPRequestHandler):
         header = self.headers.get("Authorization", "") or ""
         if header.lower().startswith("bearer "):
             return header[7:].strip()
-        return ""
+        cookies = {}
+        for part in (self.headers.get("Cookie", "") or "").split(";"):
+            if "=" in part:
+                key, value = part.split("=", 1)
+                cookies[key.strip()] = value.strip()
+        return cookies.get("store_ops_session", "")
 
     def _demo_context(self, user_id: str) -> SecurityContext:
         user = self.agent.user(user_id or "manager-001")     # 未知用户抛 ValueError
@@ -452,6 +461,12 @@ class AgentHandler(BaseHTTPRequestHandler):
             if context.store_id != self.tools.store_id:
                 # 令牌只对签发的门店有效；当前服务只挂载一个门店
                 raise AuthError(f"该账号登录的门店是 {context.store_id}，本服务只服务 {self.tools.store_id}")
+            max_age = 43200
+            csrf = secrets.token_urlsafe(24)
+            cookies = [
+                ("Set-Cookie", f"store_ops_session={result['token']}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"),
+                ("Set-Cookie", f"store_ops_csrf={csrf}; Path=/; SameSite=Strict; Max-Age={max_age}"),
+            ]
             self._json(200, {
                 "token": result["token"],
                 "expires_at": result["expires_at"],
@@ -459,7 +474,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "tenant_id": context.tenant_id,
                 "store_id": context.store_id,
                 "permissions": sorted(context.permissions),
-            })
+            }, extra=cookies)
         except AccountLocked as exc:
             self._json(423, {"error": str(exc)})
         except (AuthError, ValueError, json.JSONDecodeError) as exc:
@@ -480,7 +495,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         self.auth.record_audit(event_type="logout", actor_type="user", actor_id=context.user_id,
                                tenant_id=context.tenant_id, store_id=context.store_id,
                                object_type="session", object_id=context.session_id)
-        self._json(200, {"revoked": revoked})
+        self._json(200, {"revoked": revoked}, extra=[
+            ("Set-Cookie", "store_ops_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
+            ("Set-Cookie", "store_ops_csrf=; Path=/; SameSite=Strict; Max-Age=0"),
+        ])
 
     def _chat(self) -> None:
         body: dict = {}

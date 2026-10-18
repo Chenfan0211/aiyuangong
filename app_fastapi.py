@@ -30,14 +30,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_tools import PermissionDenied, StoreTools
+from approval_callbacks import ApprovalCallbackError, create_approval_callback_adapter
 from evidence_store import EvidenceError, EvidenceNotFoundError, EvidenceStore
 from outcome_tracker import OutcomeTracker, OutcomeTrackerError
+from ops_store import OpsStore, OpsStoreError
 from auth import AuthError, AuthStore, AccountLocked, CredentialsError, ROLES, SessionInvalid, SecurityContext
 from governance import ApprovalStore, AuditCenter, ToolRunLog, apply_decision, log_tool_call
 from platform_data import PlatformMetricStore
 from llm_agent import OpenAIToolResponder, ToolCallingAgent
 from reporting import StoreReporter
-from registry import RegistryStore
+from registry import RegistryError, RegistryStore
 from snapshot_builder import SnapshotError, load_config, save_config
 from store_agent import AgentSessionStore, OpenAICompatibleResponder, StoreOperationsAgent
 from task_store import TaskStore, TaskStoreError
@@ -58,6 +60,21 @@ def _deep_update(target: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any
         else:
             target[key] = value
     return target
+
+
+
+
+def _approval_callback_secret(provider: str) -> str:
+    shared = os.getenv("STORE_AGENT_APPROVAL_CALLBACK_SECRET", "").strip()
+    if provider == "mock":
+        return shared or "mock-callback-secret"
+    if provider == "feishu":
+        return (os.getenv("FEISHU_VERIFICATION_TOKEN") or os.getenv("FEISHU_ENCRYPT_KEY")
+                or os.getenv("FEISHU_APP_SECRET") or shared).strip()
+    if provider == "wecom":
+        return (os.getenv("WECOM_CALLBACK_TOKEN") or os.getenv("WECOM_ENCODING_AES_KEY")
+                or os.getenv("WECOM_SECRET") or shared).strip()
+    return ""
 
 
 def validate_startup(host: str, auth_mode: str) -> None:
@@ -98,6 +115,7 @@ class FeedbackRequest(BaseModel):
 
 class ConfigPatchRequest(BaseModel):
     config: dict[str, Any] = Field(..., description="需要合并到当前门店配置的字段")
+    revision: Optional[str] = Field(None, description="当前配置 revision；不一致返回 409")
 
 
 class MemberCreateRequest(BaseModel):
@@ -139,9 +157,11 @@ class AppContext:
     def __init__(self, config_path: Path, metrics_db: Path, store_db: Path, chat_db: Path,
                  auth_mode: str = "session", evidence_dir: Path = ROOT / "evidence"):
         self.config_path = Path(config_path)
-        self.config = load_config(self.config_path)
-        tenant_id = str(self.config.get("tenant_id") or "")
-        RegistryStore(store_db, tenant_id=tenant_id).register(self.config)
+        file_config = load_config(self.config_path)
+        tenant_id = str(file_config.get("tenant_id") or "")
+        self.registry = RegistryStore(store_db, tenant_id=tenant_id)
+        self.config = self.registry.effective_config(file_config)
+        self.config_revision = self.registry.current_revision(tenant_id, str(self.config.get("store_id") or ""))
         tenant_id = str(self.config.get("tenant_id") or "")
         self.metric_store = PlatformMetricStore(metrics_db, tenant_id=tenant_id)
         self.task_store = TaskStore(store_db, tenant_id=tenant_id)
@@ -149,6 +169,7 @@ class AppContext:
         self.outcomes = OutcomeTracker(store_db, tenant_id=tenant_id)
         self.auth = AuthStore(store_db, tenant_id=tenant_id)
         self.tools = StoreTools(self.config, self.metric_store, self.task_store, config_path=self.config_path)
+        self.ops = OpsStore(store_db, tenant_id=tenant_id, store_id=self.store_id)
         self.sessions = AgentSessionStore(chat_db, tenant_id=tenant_id)
         self.approvals = ApprovalStore(store_db, tenant_id=tenant_id)
         self.tool_log = ToolRunLog(store_db, tenant_id=tenant_id)
@@ -194,6 +215,17 @@ def create_app(
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        unsafe = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        path = request.url.path
+        csrf_exempt = (path in {"/api/auth/login", "/api/auth/mfa/verify"}
+                       or path.startswith("/api/webhooks/"))
+        bearer = request.headers.get("authorization", "").lower().startswith("bearer ")
+        if (unsafe and path.startswith("/api/") and not csrf_exempt and not bearer
+                and request.cookies.get("store_ops_session")):
+            expected = request.cookies.get("store_ops_csrf", "")
+            actual = request.headers.get("x-csrf-token", "")
+            if not expected or not secrets.compare_digest(expected, actual):
+                return JSONResponse(status_code=403, content={"detail": "CSRF 校验失败"})
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
         started = time.perf_counter()
         response = await call_next(request)
@@ -302,7 +334,10 @@ def create_app(
 
     def _set_session_cookie(response: Response, token: str, expires_at: str) -> None:
         max_age = max(60, int((datetime.fromisoformat(expires_at) - datetime.now()).total_seconds()))
+        csrf = secrets.token_urlsafe(24)
         response.set_cookie("store_ops_session", token, max_age=max_age, httponly=True,
+                            secure=_is_production(), samesite="strict", path="/")
+        response.set_cookie("store_ops_csrf", csrf, max_age=max_age, httponly=False,
                             secure=_is_production(), samesite="strict", path="/")
 
     @app.post("/api/auth/login", tags=["认证"], summary="用户名口令登录")
@@ -356,7 +391,10 @@ def create_app(
         if ctx.auth_mode == "demo":
             return {"revoked": False, "auth_mode": "demo"}
         revoked = ctx.auth.logout(token)
-        response.delete_cookie("store_ops_session", path="/")
+        response.set_cookie("store_ops_session", "", max_age=0, expires=0, httponly=True,
+                            secure=_is_production(), samesite="strict", path="/")
+        response.set_cookie("store_ops_csrf", "", max_age=0, expires=0, httponly=False,
+                            secure=_is_production(), samesite="strict", path="/")
         ctx.auth.record_audit(event_type="logout", actor_type="user", actor_id=context.user_id,
                               tenant_id=context.tenant_id, store_id=context.store_id,
                               object_type="session", object_id=context.session_id)
@@ -370,11 +408,38 @@ def create_app(
             "permissions": sorted(context.permissions),
         }
 
+    @app.post("/api/webhooks/approvals/{provider}", tags=["治理"], summary="审批回调（签名、nonce、幂等）")
+    async def approval_webhook(provider: str, request: Request) -> dict[str, Any]:
+        normalized = str(provider or "").lower()
+        if normalized not in {"mock", "feishu", "wecom"}:
+            raise HTTPException(status_code=404, detail="不支持的审批回调提供方")
+        secret = _approval_callback_secret(normalized)
+        if not secret:
+            raise HTTPException(status_code=503, detail="审批回调密钥尚未配置")
+        body = await request.body()
+        adapter = create_approval_callback_adapter(
+            normalized, secret=secret, db_target=ctx.registry.db.target,
+            approval_store=ctx.approvals, task_store=ctx.task_store,
+            tenant_id=str(ctx.config.get("tenant_id") or ""), store_id=ctx.store_id,
+            decision_applier=lambda approval_id, decision, actor, reason: apply_decision(
+                ctx.approvals, ctx.task_store, approval_id, decision, actor, reason),
+        )
+        try:
+            result = adapter.handle(body, dict(request.headers))
+        except ApprovalCallbackError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.reason) from exc
+        ctx.auth.record_audit(event_type="approval_callback", actor_type="external", actor_id=normalized,
+                              tenant_id=str(ctx.config.get("tenant_id") or ""), store_id=ctx.store_id,
+                              object_type="approval", object_id=result.get("approval_id", ""),
+                              after={"decision": result.get("decision"), "duplicate": result.get("duplicate")})
+        return {"result": result}
+
     # ---------------- 管理后台 ----------------
 
     @app.get("/api/admin/config", tags=["管理"], summary="读取门店配置")
     def admin_config_get(context: SecurityContext = Depends(require("config:write"))) -> dict[str, Any]:
-        return {"config": ctx.config, "store_id": ctx.store_id, "tenant_id": ctx.config.get("tenant_id")}
+        return {"config": ctx.config, "revision": ctx.config_revision,
+                "store_id": ctx.store_id, "tenant_id": ctx.config.get("tenant_id")}
 
     @app.patch("/api/admin/config", tags=["管理"], summary="修改门店配置并写审计")
     def admin_config_patch(payload: ConfigPatchRequest,
@@ -382,15 +447,16 @@ def create_app(
         before = json.loads(json.dumps(ctx.config, ensure_ascii=False))
         merged = _deep_update(json.loads(json.dumps(ctx.config, ensure_ascii=False)), payload.config)
         try:
-            save_config(ctx.config_path, merged)
-        except SnapshotError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            ctx.registry.update_config(merged, expected_revision=payload.revision)
+        except RegistryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         _deep_update(ctx.config, payload.config)
+        ctx.config_revision = ctx.registry.current_revision(context.tenant_id, ctx.store_id)
         ctx.auth.record_audit(event_type="store_config_updated", actor_type="user", actor_id=context.user_id,
                               tenant_id=context.tenant_id, store_id=context.store_id,
                               object_type="store_config", object_id=ctx.store_id,
                               before=before, after=merged)
-        return {"config": ctx.config, "updated": True}
+        return {"config": ctx.config, "revision": ctx.config_revision, "updated": True}
 
     @app.get("/api/admin/members", tags=["管理"], summary="列出门店成员")
     def admin_members(context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
@@ -433,6 +499,36 @@ def create_app(
                               tenant_id=context.tenant_id, store_id=context.store_id,
                               object_type="user", object_id=user_id)
         return {"mfa_enabled": ctx.auth.is_mfa_enabled(user_id)}
+
+    @app.get("/api/admin/ops-runs", tags=["管理"], summary="列出运维任务运行记录")
+    def admin_ops_runs(limit: int = Query(100, ge=1, le=1000),
+                       job_name: Optional[str] = Query(None),
+                       context: SecurityContext = Depends(require("audit:read"))) -> dict[str, Any]:
+        return {"runs": ctx.ops.list_runs(job_name=job_name, limit=limit, ascending=False)}
+
+    @app.get("/api/admin/ops-runs/{run_id}", tags=["管理"], summary="查看运维任务运行详情")
+    def admin_ops_run(run_id: int,
+                      context: SecurityContext = Depends(require("audit:read"))) -> dict[str, Any]:
+        record = ctx.ops.get_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="运行记录不存在")
+        return {"run": record}
+
+    @app.post("/api/admin/ops-runs/{run_id}/retry", tags=["管理"], summary="请求重跑运维任务")
+    def admin_ops_run_retry(run_id: int,
+                            context: SecurityContext = Depends(require("config:write"))) -> dict[str, Any]:
+        source = ctx.ops.get_run(run_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="运行记录不存在")
+        if source["status"] not in {"failed", "skipped"}:
+            raise HTTPException(status_code=409, detail="只有失败或跳过的任务可以重试")
+        queued = ctx.ops.record_run("daily_sync", "retry-request", status="skipped",
+                                    details={"source_run_id": run_id, "requested_by": context.user_id},
+                                    alert_status="not_needed")
+        ctx.auth.record_audit(event_type="ops_retry_requested", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="ops_run", object_id=str(run_id))
+        return {"accepted": True, "queued_run": queued}
 
     # ---------------- 门店与数据 ----------------
 

@@ -33,6 +33,27 @@ services:
         condition: service_healthy
     networks: [internal]
 
+  backup:
+    build: .
+    profiles: ["ops"]
+    restart: "no"
+    env_file: .env.production
+    environment:
+      STORE_AGENT_ENV: production
+      STORE_AGENT_STORE_DB: postgresql://${POSTGRES_USER:-mall_ops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mall_ops}
+      STORE_AGENT_BACKUP_STORAGE: ${STORE_AGENT_BACKUP_STORAGE:-local}
+      STORE_AGENT_BACKUP_LOCAL_ROOT: /app/data/backups
+      BACKUP_ENCRYPTION_KEY_FILE: /app/data/backups/.backup-key
+    volumes:
+      - backup_data:/app/data
+      - evidence_data:/app/evidence:ro
+      - ./store_config.json:/app/store_config.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+    command: ["sh", "scripts/backup.sh"]
+
   caddy:
     image: caddy:2.8
     restart: unless-stopped
@@ -55,5 +76,6 @@ volumes:
   postgres_data:
   evidence_data:
   imports_inbox:
+  backup_data:
   caddy_data:
   caddy_config:

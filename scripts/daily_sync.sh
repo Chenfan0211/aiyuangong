@@ -1,21 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
-exec 9>/tmp/store_ops_daily.lock
-flock -n 9 || { echo "daily sync already running"; exit 0; }
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+STORE_ID="${STORE_AGENT_STORE_ID:-WH-LION-001}"
 
-STORE_ID="${STORE_ID:-WH-LION-001}"
-METRICS_DB="${STORE_AGENT_METRICS_DB:?missing STORE_AGENT_METRICS_DB}"
-STORE_DB="${STORE_AGENT_STORE_DB:?missing STORE_AGENT_STORE_DB}"
-CONFIG="${STORE_AGENT_CONFIG:-/app/store_config.json}"
+cd "$ROOT_DIR"
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 
-python platform_sync.py --db "$METRICS_DB" --config "$CONFIG" --store-id "$STORE_ID" import-dir
-if [ "$?" -ne 0 ]; then
-  echo "import failed; stopping before planning" >&2
-  exit 1
-fi
-python platform_sync.py --db "$METRICS_DB" --config "$CONFIG" --store-id "$STORE_ID" data-quality --days 30
-python store_cli.py --config "$CONFIG" --metrics-db "$METRICS_DB" --store-db "$STORE_DB" plan --date today
-python store_cli.py --config "$CONFIG" --store-db "$STORE_DB" notify --kind daily
-python platform_sync.py --db "$METRICS_DB" --config "$CONFIG" --store-id "$STORE_ID" status
-python platform_sync.py --db "$METRICS_DB" --config "$CONFIG" --store-id "$STORE_ID" summary --days 7
+exec "$PYTHON_BIN" "$ROOT_DIR/scripts/daily_sync.py" --store-id "$STORE_ID" "$@"

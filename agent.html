@@ -17,6 +17,11 @@
       <label for="password" style="margin-top:8px">口令</label>
       <input id="password" type="password" autocomplete="current-password" placeholder="口令" />
       <button class="login-btn" id="loginBtn">登录</button>
+      <div id="mfaBox" hidden>
+        <label for="mfaCode" style="margin-top:8px">动态验证码或恢复码</label>
+        <input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码或恢复码" />
+        <button class="login-btn" id="mfaVerifyBtn" type="button">验证</button>
+      </div>
       <p class="login-hint" id="loginHint"></p>
     </div>
     <div class="user-card" id="userCard" hidden>
@@ -40,6 +45,7 @@
     <footer class="composer"><div class="compose-row"><textarea id="input" rows="1" placeholder="问问 Agent，例如：我今天有什么任务？"></textarea><button class="send" id="send">发送</button></div><p class="hint">请勿输入顾客完整手机号、身份证、工资或平台密钥。改价、赔付、警告、奖惩和发布不会被直接执行。</p></footer>
   </main>
 </div>
+<script src="/static/session-client.js"></script>
 <script src="/static/agent.js"></script>
 </body>
 </html>

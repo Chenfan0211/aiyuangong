@@ -1,32 +1,43 @@
 # 生产化落地状态
 
-- 日期：2026-10-18
+- 日期：2026-10-19
 - 分支：`production-hardening`
-- 验证：`python -m unittest discover -p "test_*.py"` → 316 passed；所有静态 JS 通过 `node --check`。
+- Python：`python -m unittest discover -p "test_*.py"` → **384 passed**
+- 浏览器：`PLAYWRIGHT_CHANNEL=chrome npm run test:e2e` → **12 passed**（desktop + mobile）
 
 ## 已完成
 
-- Windows CLI JSON 输出改为 ASCII 安全，修复 cp936 下 `¥` 导致的进程失败。
-- 修复治理页/看板页存储型 XSS；内联 JS/CSS 外置；两套服务统一严格 CSP、frame/nosniff/referrer 响应头。
-- FastAPI 禁止 `demo + 非回环地址`；生产环境关闭 `/docs`、`/redoc`、`/openapi.json`。
-- 新增 TOTP MFA、恢复码、两步登录；浏览器登录同时下发 HttpOnly/Secure/SameSite=Strict Cookie。
-- 图片证据使用随机文件名、magic-byte 校验、5MB 上限、tenant/store/task 作用域读取和哈希校验。
-- 数据缺失或评价周期过期时按规则跳过，不再补零或强制剩余 1 天；生成补数任务。
-- PostgreSQL 备份/恢复/演练支持 tenant 上下文，恢复前强制校验；保留期改为租户作用域、先归档后删除。
-- 新增 Dockerfile、Compose、Caddy HTTPS、生产依赖锁定、健康检查、Prometheus 文本指标、请求 ID/结构化访问日志。
-- 新增 owner 设置与成员页面、配置原子写入、成员创建、口令/MFA 重置。
-- 新增任务待验收队列、图片证据上传、任务反馈与 D+7/D+28 结果归因模块。
+- 数据库配置真相源：首次从 JSON 导入，后续以 `store_configs` 为准；管理 API 使用 revision 乐观锁。
+- 版本化迁移：`schema_migrations`、迁移锁、status/dry-run/apply/verify、恢复点清单和并发保护。
+- 统一运维调度：`ops_runs`、SQLite/PostgreSQL 锁、最多 3 次重试、固定备份到摘要顺序、outbox/Webhook 告警适配。
+- 加密备份：本地无密钥模式、AES-GCM、SHA-256、证据和配置打包、全新库恢复演练、30/12 保留、S3 假客户端契约。
+- 浏览器安全：无 localStorage token、HttpOnly 会话 Cookie、CSRF 双提交、401 统一处理、共享 session-client。
+- 审批回调：mock/飞书/企微 adapter、签名、时间窗、nonce、幂等回执和固定通过/驳回决策。
+- 任务与证据：待验收、图片证据、哈希校验、反馈和 D+7/D+28 结果归因。
+- 云部署：Docker Compose、Caddy HTTPS、健康检查、Prometheus 文本指标和结构化日志。
 
-## 仍需上线前完成
+## 真实第三方联调待密钥/域名
 
-- 将生产配置从 `store_config.json` 完全迁移到 `store_configs` 表；当前管理页原子更新 JSON，服务同步更新内存配置。
-- 接入 S3 兼容对象存储的每日加密备份、30 日/12 月保留和异地恢复演练；Compose 包未包含外部备份凭据。
-- 为 PostgreSQL 引入正式的 `schema_migrations` 迁移锁/回滚流程；当前仍以幂等 schema.sql + 人工备份为主。
-- 将每日任务结果写入 `ops_runs` 并在飞书/企微中闭环失败告警。
-- 浏览器端统一改为 Cookie/CSRF 会话，彻底移除 localStorage token 兼容路径；CLI 继续保留 Bearer。
-- 增加真实浏览器 E2E（桌面/移动、MFA、任务验收、图片上传、管理后台）。
-- 飞书/企微交互式审批卡片仍需公网回调、验签和重放防护。
+- S3：`S3_ENDPOINT / S3_REGION / S3_BUCKET / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY`
+- 备份加密：`BACKUP_ENCRYPTION_KEY`
+- 飞书：`FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_VERIFICATION_TOKEN / FEISHU_ENCRYPT_KEY`
+- 企微：`WECOM_CORP_ID / WECOM_AGENT_ID / WECOM_SECRET / WECOM_CALLBACK_TOKEN / WECOM_ENCODING_AES_KEY`
+- 域名/TLS：`DOMAIN / ACME_EMAIL`
+- MFA 生产密钥：`STORE_AGENT_MFA_KEY`
+- LLM 仍可选：`STORE_AGENT_LLM_API_KEY`
 
-## 云主机部署入口
+## 无密钥默认模式
 
-`deploy/README.md` 与根目录 `compose.yaml` 提供 Ubuntu 24.04 + Docker Compose + Caddy + PostgreSQL 16 部署说明。RPO 目标 ≤ 24 小时，RTO 目标 ≤ 2 小时；正式上线前必须完成一次服务器外恢复演练。
+- `STORE_AGENT_BACKUP_STORAGE=local`：本地加密备份和恢复演练可完整执行。
+- `STORE_AGENT_ALERT_CHANNEL=outbox`：告警写草稿，不发真实群。
+- `STORE_AGENT_APPROVAL_CALLBACK_PROVIDER=mock`：本地签名回调全链路可测。
+- 真实 S3 上传、真实飞书/企微卡片和真实 TLS 只在密钥/域名到位后验收，不能提前标记为已验证。
+
+## 关键验证命令
+
+```powershell
+python -m unittest discover -p "test_*.py"
+node --check static/session-client.js
+npm.cmd install
+$env:PLAYWRIGHT_CHANNEL='chrome'; npm.cmd run test:e2e
+```

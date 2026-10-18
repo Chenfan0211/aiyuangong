@@ -26,3 +26,6 @@ Thumbs.db
 
 # 图片证据（运行时数据）
 evidence/
+node_modules/
+playwright-report/
+test-results/

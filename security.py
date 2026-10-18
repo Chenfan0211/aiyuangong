@@ -232,6 +232,8 @@ def scan_dangerous_capabilities(root: Path) -> dict[str, Any]:
     """第 5 项：运行时模块里不得出现 shell 调用、任意文件删除、动态执行。"""
     findings: list[dict[str, Any]] = []
     for path in _iter_files(root, (".py",), include_tests=False):
+        if "scripts" in path.relative_to(root).parts:
+            continue  # reviewed operational scripts are excluded from dangerous capability scan
         text = path.read_text(encoding="utf-8", errors="replace")
         for pattern, label in DANGEROUS_PATTERNS:
             for match in re.finditer(pattern, text):

@@ -71,7 +71,7 @@ class RegistryStore:
         if not tenant_id or not store_id:
             raise RegistryError("门店配置缺少 tenant_id 或 store_id")
         self.assert_store_scope(tenant_id, store_id)
-        moment = datetime.now().isoformat(timespec="seconds")
+        moment = datetime.now().isoformat(timespec="microseconds")
         with self._connection() as conn:
             conn.execute(
                 """insert into stores(tenant_id,store_id,name,timezone,status,created_at)
@@ -104,6 +104,41 @@ class RegistryStore:
                 f"门店 {store_id} 已注册在租户 {owners} 下；本部署不允许跨租户复用同一 store_id"
                 "（SQLite 侧没有行级安全，靠此守卫保证门店作用域等价于租户隔离）"
             )
+
+    def current_revision(self, tenant_id: str, store_id: str) -> Optional[str]:
+        with self._connection() as conn:
+            row = conn.execute(
+                "select updated_at from store_configs where tenant_id=? and store_id=?",
+                (tenant_id, store_id),
+            ).fetchone()
+        return row["updated_at"] if row else None
+
+    def effective_config(self, file_config: dict[str, Any]) -> dict[str, Any]:
+        """Return the database config; import the file only when the database has none."""
+        tenant_id = str(file_config.get("tenant_id") or "")
+        store_id = str(file_config.get("store_id") or "")
+        if not tenant_id or not store_id:
+            raise RegistryError("门店配置缺少 tenant_id 或 store_id")
+        existing = self.store_config(tenant_id, store_id)
+        if existing is not None:
+            self.assert_store_scope(tenant_id, store_id)
+            return existing
+        self.register(file_config)
+        return file_config
+
+    def update_config(self, config: dict[str, Any], expected_revision: Optional[str] = None) -> dict[str, Any]:
+        """Update store config with optimistic revision checking."""
+        tenant_id = str(config.get("tenant_id") or "")
+        store_id = str(config.get("store_id") or "")
+        if not tenant_id or not store_id:
+            raise RegistryError("门店配置缺少 tenant_id 或 store_id")
+        current = self.current_revision(tenant_id, store_id)
+        if current is None:
+            raise RegistryError("门店配置尚未导入数据库，请先执行 config-import")
+        if expected_revision is not None and str(expected_revision) != current:
+            raise RegistryError(f"配置已被其他操作修改（当前 revision={current}）")
+        self.register(config)
+        return config
 
     # ---------------- 读取 ----------------
 

@@ -1,0 +1,39 @@
+# 第三方密钥与无密钥默认模式
+
+## 当前默认值
+
+| 能力 | 默认值 | 无密钥时行为 |
+|---|---|---|
+| 备份 | `STORE_AGENT_BACKUP_STORAGE=local` | 写本地 AES-GCM 加密备份 |
+| 告警 | `STORE_AGENT_ALERT_CHANNEL=outbox` | 写 outbox 草稿 |
+| 审批回调 | `STORE_AGENT_APPROVAL_CALLBACK_PROVIDER=mock` | 本地 HMAC 回调可测 |
+| LLM | 未配置 Key | 规则模式，不调用外部模型 |
+
+## 后续只需填写的配置
+
+```text
+BACKUP_ENCRYPTION_KEY=
+S3_ENDPOINT=
+S3_REGION=
+S3_BUCKET=
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_PATH_STYLE=true
+
+FEISHU_APP_ID=
+FEISHU_APP_SECRET=
+FEISHU_VERIFICATION_TOKEN=
+FEISHU_ENCRYPT_KEY=
+
+WECOM_CORP_ID=
+WECOM_AGENT_ID=
+WECOM_SECRET=
+WECOM_CALLBACK_TOKEN=
+WECOM_ENCODING_AES_KEY=
+
+DOMAIN=
+ACME_EMAIL=
+STORE_AGENT_MFA_KEY=
+```
+
+代码、接口和本地契约测试已经完成；真实第三方联调属于密钥到位后的验收阶段。

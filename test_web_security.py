@@ -42,7 +42,7 @@ class StaticAssetAndHeaderTests(unittest.TestCase):
             self.assertIn("/static/", html, path)
 
     def test_static_assets_are_served(self):
-        for name in ("agent.css", "agent.js", "dashboard.css", "dashboard.js",
+        for name in ("session-client.js", "agent.css", "agent.js", "dashboard.css", "dashboard.js",
                      "governance.css", "governance.js", "index.css", "index.js"):
             response = self.client.get("/static/" + name)
             self.assertEqual(response.status_code, 200, name)
