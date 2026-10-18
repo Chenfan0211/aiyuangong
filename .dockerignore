@@ -1,0 +1,9 @@
+.git
+__pycache__
+*.py[cod]
+data
+evidence
+imports/inbox/*
+config/.env
+.env
+.pytest_cache

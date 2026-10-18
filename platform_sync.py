@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -30,9 +31,9 @@ ROOT = Path(__file__).resolve().parent
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="门店平台经营数据同步")
-    parser.add_argument("--db", default=str(ROOT / "data" / "platform_metrics.db"),
+    parser.add_argument("--db", default=os.getenv("STORE_AGENT_METRICS_DB", str(ROOT / "data" / "platform_metrics.db")),
                         help="平台指标库：SQLite 路径或 postgresql:// DSN")
-    parser.add_argument("--config", type=Path, default=ROOT / "store_config.json")
+    parser.add_argument("--config", type=Path, default=Path(os.getenv("STORE_AGENT_CONFIG", ROOT / "store_config.json")))
     parser.add_argument("--store-id", default="WH-LION-001", help="门店编码，默认 WH-LION-001")
 
     # 子命令内也接受 --store-id；default=SUPPRESS 保证不会覆盖全局上已给的值

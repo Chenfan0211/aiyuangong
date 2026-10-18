@@ -555,12 +555,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="启动门店运营 Agent（FastAPI）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
-    parser.add_argument("--config", type=Path, default=ROOT / "store_config.json")
-    parser.add_argument("--metrics-db", default=str(ROOT / "data" / "platform_metrics.db"),
+    parser.add_argument("--config", type=Path, default=Path(os.getenv("STORE_AGENT_CONFIG", ROOT / "store_config.json")))
+    parser.add_argument("--metrics-db", default=os.getenv("STORE_AGENT_METRICS_DB", str(ROOT / "data" / "platform_metrics.db")),
                         help="平台指标库：SQLite 路径或 postgresql:// DSN")
-    parser.add_argument("--store-db", default=str(ROOT / "data" / "store_ops.db"),
+    parser.add_argument("--store-db", default=os.getenv("STORE_AGENT_STORE_DB", str(ROOT / "data" / "store_ops.db")),
                         help="任务/证据/身份库：SQLite 路径或 postgresql:// DSN")
-    parser.add_argument("--chat-db", default=str(ROOT / "data" / "agent_demo.db"),
+    parser.add_argument("--chat-db", default=os.getenv("STORE_AGENT_CHAT_DB", str(ROOT / "data" / "agent_demo.db")),
                         help="对话消息库：SQLite 路径或 postgresql:// DSN")
     parser.add_argument("--auth-mode", choices=("session", "demo"), default="session")
     args = parser.parse_args()

@@ -57,10 +57,10 @@ ROOT = Path(__file__).resolve().parent
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="门店运营命令行（快照 / 计划 / 任务）")
-    parser.add_argument("--config", type=Path, default=ROOT / "store_config.json", help="门店配置文件")
-    parser.add_argument("--metrics-db", default=str(ROOT / "data" / "platform_metrics.db"),
+    parser.add_argument("--config", type=Path, default=Path(os.getenv("STORE_AGENT_CONFIG", ROOT / "store_config.json")), help="门店配置文件")
+    parser.add_argument("--metrics-db", default=os.getenv("STORE_AGENT_METRICS_DB", str(ROOT / "data" / "platform_metrics.db")),
                         help="平台指标库：SQLite 路径或 postgresql:// DSN")
-    parser.add_argument("--store-db", default=str(ROOT / "data" / "store_ops.db"),
+    parser.add_argument("--store-db", default=os.getenv("STORE_AGENT_STORE_DB", str(ROOT / "data" / "store_ops.db")),
                         help="任务/证据/审计/身份库：SQLite 路径或 postgresql:// DSN")
     parser.add_argument("--store-id", default=None, help="默认取 store_config.json 中的 store_id")
     sub = parser.add_subparsers(dest="command", required=True)
