@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,6 +35,19 @@ from task_store import TaskStore, TaskStoreError
 
 ROOT = Path(__file__).resolve().parent
 WRITE_STATUSES = ("accepted", "done", "verified", "rejected", "canceled", "ready")
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def validate_startup(host: str, auth_mode: str) -> None:
+    """Reject combinations that would expose demo identity spoofing to the network."""
+    if auth_mode == "demo" and host not in LOOPBACK_HOSTS:
+        raise ValueError("demo 认证模式只能绑定回环地址（127.0.0.1 / localhost / ::1）")
+
+
+def _is_production() -> bool:
+    return os.getenv("STORE_AGENT_ENV", "development").strip().lower() in {"production", "prod"}
+
 
 
 # ---------------- 请求模型（同时生成 OpenAPI 文档） ----------------
@@ -116,11 +130,15 @@ def create_app(
     auth_mode: str = "session",
 ) -> FastAPI:
     ctx = AppContext(config_path, metrics_db, store_db, chat_db, auth_mode)
+    production = _is_production()
     app = FastAPI(
         title="门店运营 Agent API",
         version="0.2.0",
         description="武汉狮子座店单店试点：平台经营数据、任务闭环、数据质量与店长日报。"
                     "除 /api/auth/login 外，所有数据接口都需要 Bearer 令牌。",
+        docs_url=None if production else "/docs",
+        redoc_url=None if production else "/redoc",
+        openapi_url=None if production else "/openapi.json",
     )
     app.state.ctx = ctx
 
@@ -500,6 +518,7 @@ def main() -> None:
                         help="对话消息库：SQLite 路径或 postgresql:// DSN")
     parser.add_argument("--auth-mode", choices=("session", "demo"), default="session")
     args = parser.parse_args()
+    validate_startup(args.host, args.auth_mode)
 
     import uvicorn
 
