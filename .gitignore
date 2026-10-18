@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 
-# 运行时数据库与日志（不得入库）
+# 运行时数据库、归档和日志（不得入库）
+data/
 data/*.db
 data/*.db-journal
 data/*.db-wal
@@ -22,3 +23,6 @@ config/.env
 .idea/
 .DS_Store
 Thumbs.db
+
+# 图片证据（运行时数据）
+evidence/

@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_tools import PermissionDenied, StoreTools
+from evidence_store import EvidenceError, EvidenceNotFoundError, EvidenceStore
 from auth import AuthError, AuthStore, AccountLocked, CredentialsError, SessionInvalid, SecurityContext
 from governance import ApprovalStore, AuditCenter, ToolRunLog, apply_decision, log_tool_call
 from platform_data import PlatformMetricStore
@@ -108,7 +109,7 @@ class AppContext:
     """一次进程内共享的依赖容器。"""
 
     def __init__(self, config_path: Path, metrics_db: Path, store_db: Path, chat_db: Path,
-                 auth_mode: str = "session"):
+                 auth_mode: str = "session", evidence_dir: Path = ROOT / "evidence"):
         self.config_path = Path(config_path)
         self.config = load_config(self.config_path)
         tenant_id = str(self.config.get("tenant_id") or "")
@@ -116,6 +117,7 @@ class AppContext:
         tenant_id = str(self.config.get("tenant_id") or "")
         self.metric_store = PlatformMetricStore(metrics_db, tenant_id=tenant_id)
         self.task_store = TaskStore(store_db, tenant_id=tenant_id)
+        self.evidence = EvidenceStore(store_db, root_dir=evidence_dir, tenant_id=tenant_id)
         self.auth = AuthStore(store_db, tenant_id=tenant_id)
         self.tools = StoreTools(self.config, self.metric_store, self.task_store, config_path=self.config_path)
         self.sessions = AgentSessionStore(chat_db, tenant_id=tenant_id)
@@ -144,8 +146,9 @@ def create_app(
     store_db: Path = ROOT / "data" / "store_ops.db",
     chat_db: Path = ROOT / "data" / "agent_demo.db",
     auth_mode: str = "session",
+    evidence_dir: Path = ROOT / "evidence",
 ) -> FastAPI:
-    ctx = AppContext(config_path, metrics_db, store_db, chat_db, auth_mode)
+    ctx = AppContext(config_path, metrics_db, store_db, chat_db, auth_mode, evidence_dir)
     production = _is_production()
     app = FastAPI(
         title="门店运营 Agent API",
@@ -433,6 +436,60 @@ def create_app(
                               object_type="action_task", object_id=task_id,
                               after={"evidence_type": payload.evidence_type, "object_ref": payload.object_ref})
         return {"evidence": rows[-1], "task": ctx.task_store.get_task(task_id)}
+
+    @app.post("/api/tasks/{task_id}/evidence-upload", tags=["任务"], summary="上传图片证据并绑定任务")
+    async def upload_evidence(task_id: str, request: Request,
+                              filename: str = Query(..., min_length=1, max_length=255),
+                              note: str = Query("", max_length=500),
+                              session_id: str = Query("", max_length=80),
+                              context: SecurityContext = Depends(require("tasks:read:own"))) -> dict[str, Any]:
+        user = context.to_user_dict()
+        try:
+            task = ctx.task_store.get_task(task_id)
+        except TaskStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _require_visible(context, task)
+        if not ctx.tools.can_submit_evidence(user, task):
+            raise HTTPException(status_code=403, detail="只有任务负责人或管理者可以上传证据")
+        if session_id:
+            ctx.task_store.bind_session(session_id, context.user_id, context.role)
+        data = await request.body()
+        try:
+            record = ctx.evidence.save(task_id, filename, data, context.display_name,
+                                       store_id=context.store_id, tenant_id=context.tenant_id,
+                                       mime_type=request.headers.get("content-type"))
+        except EvidenceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.task_store.add_evidence(task_id, "图片", record["evidence_id"], context.display_name, note)
+        rows = ctx.task_store.evidence(task_id)
+        ctx.auth.record_audit(event_type="task_image_evidence_submitted", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="action_task", object_id=task_id,
+                              after={"evidence_id": record["evidence_id"], "mime_type": record["mime_type"]})
+        return {"evidence_file": record, "evidence": rows[-1], "task": ctx.task_store.get_task(task_id)}
+
+    @app.get("/api/evidence/{evidence_id}", tags=["任务"], summary="读取图片证据")
+    def download_evidence(evidence_id: str, task_id: str = Query(..., min_length=1),
+                          context: SecurityContext = Depends(require("tasks:read:own"))):
+        try:
+            task = ctx.task_store.get_task(task_id)
+        except TaskStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _require_visible(context, task)
+        if not ctx.tools.can_submit_evidence(context.to_user_dict(), task):
+            raise HTTPException(status_code=403, detail="无权读取该任务证据")
+        try:
+            data = ctx.evidence.read(evidence_id, store_id=context.store_id, task_id=task_id,
+                                     tenant_id=context.tenant_id)
+        except EvidenceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except EvidenceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        meta = next((item for item in ctx.evidence.list_evidence(store_id=context.store_id, task_id=task_id,
+                                                                 tenant_id=context.tenant_id)
+                     if item["evidence_id"] == evidence_id), {})
+        return Response(content=data, media_type=meta.get("mime_type", "application/octet-stream"),
+                        headers={"Content-Disposition": f'inline; filename="{evidence_id}"'})
 
     @app.post("/api/tasks/{task_id}/status", tags=["任务"], summary="推进任务状态")
     def change_status(task_id: str, payload: StatusRequest,
