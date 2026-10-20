@@ -16,6 +16,7 @@ from agent_tools import StoreTools
 from auth import AuthStore, permissions_for
 from governance import ToolRunLog
 from llm_agent import (
+    SYSTEM_PROMPT,
     TOOL_SPECS,
     OpenAIToolResponder,
     ToolCallingAgent,
@@ -168,6 +169,22 @@ class ToolSetTests(Base):
         self.assertIn("gmv", manager_result["platforms"]["meituan"]["metrics"])
         self.assertNotIn("gmv", employee_result["platforms"]["meituan"]["metrics"])
         self.assertFalse(employee_result["financial_included"])
+
+    def test_task_tools_include_action_fields(self):
+        agent = self.agent(ScriptedResponder([]))
+        tasks, error = agent.dispatch("get_tasks", {}, MANAGER)
+        self.assertIsNone(error)
+        first = tasks[0]
+        for field in ("category", "target", "reason", "evidence_required", "approval_required"):
+            self.assertIn(field, first)
+        detail, error = agent.dispatch("get_task_detail", {"task_id": self.task_id}, MANAGER)
+        self.assertIsNone(error)
+        for field in ("category", "target", "reason", "evidence_required", "approval_required"):
+            self.assertIn(field, detail)
+
+    def test_system_prompt_requires_action_oriented_answers(self):
+        for marker in ("结论", "优先行动建议", "验证指标", "风险与审批提醒", "diagnose_store_change"):
+            self.assertIn(marker, SYSTEM_PROMPT)
 
     def test_arguments_are_clamped(self):
         agent = self.agent(ScriptedResponder([]))

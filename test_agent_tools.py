@@ -68,7 +68,9 @@ class IntentTableTests(unittest.TestCase):
             ("哪天缺数", "data_gap"),
             ("任务完成情况", "task_progress"),
             ("这些任务为什么生成？", "explain_tasks"),
-            ("任务完成需要什么证据？", "execution_help"),
+            ("任务完成需要什么证据？", "task_help"),
+            ("这些任务具体要做什么？", "task_help"),
+            ("给我一个提升曝光的方案", "advice"),
             ("差评应该怎么处理？", "reputation_help"),
             ("套餐转化怎么优化", "package_help"),
             ("分析最近7天美团和抖音数据", "platform_metrics"),
@@ -89,7 +91,8 @@ class IntentTableTests(unittest.TestCase):
         self.assertIn("data_quality", intents)
         # 越具体的意图必须排在 list_tasks 之前，否则会被"任务/今天"抢走
         self.assertLess(intents.index("explain_tasks"), intents.index("list_tasks"))
-        self.assertLess(intents.index("execution_help"), intents.index("list_tasks"))
+        self.assertLess(intents.index("task_help"), intents.index("list_tasks"))
+        self.assertLess(intents.index("advice"), intents.index("platform_metrics"))
         self.assertLess(intents.index("data_quality"), intents.index("platform_metrics"))
 
     def test_slot_parsing(self):
@@ -206,6 +209,29 @@ class AgentToolsModeTests(Base):
         agent = self.agent()
         self.assertIn("GMV", agent.reply("最近7天美团数据", "manager-001")["answer"])
         self.assertNotIn("GMV", agent.reply("最近7天美团数据", "staff-001")["answer"])
+
+    def test_task_help_returns_concrete_task_fields(self):
+        self.seed()
+        result = self.agent().reply("这些任务具体要做什么？", "manager-001")
+        self.assertEqual(result["intent"], "task_help")
+        self.assertIn("生成依据", result["answer"])
+        self.assertIn("需要提交的证据", result["answer"])
+        self.assertIn("执行建议", result["answer"])
+
+    def test_advice_returns_structured_actions(self):
+        self.seed()
+        result = self.agent().reply("给我一个提升曝光的方案", "manager-001")
+        self.assertEqual(result["intent"], "advice")
+        self.assertIsInstance(result["advice"], dict)
+        self.assertTrue(result["advice"]["actions"])
+        self.assertIn("优先动作", result["answer"])
+        self.assertIn("watch", result["advice"])
+
+    def test_advice_without_data_returns_next_steps(self):
+        result = self.agent().reply("给我一个提升曝光的方案", "manager-001")
+        self.assertEqual(result["intent"], "advice")
+        self.assertTrue(result["advice"]["missing_data"])
+        self.assertIn("先补齐", result["answer"])
 
     def test_unknown_question_degrades_without_llm(self):
         """规则表命中不了、又没有配置大模型时，应退化为能力说明而不是编造答案。"""

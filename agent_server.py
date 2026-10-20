@@ -1,35 +1,31 @@
 #!/usr/bin/env python3
-"""门店运营 Agent 本地服务（带真实登录与 RBAC）。
+"""门店运营 Agent 核心备用服务（标准库传输层）。
+
+定位：FastAPI 是生产与完整能力入口；本入口只保留无第三方依赖时的核心排查能力。
+不支持 MFA 接管、管理后台、审批回调、图片证据上传和 D+7/D+28 结果模块；启用 MFA 时
+启动阶段会直接拒绝，提示改用 ``app_fastapi.py``。
 
 认证模式：
-  - `--auth-mode session`（默认）：所有接口都要 `Authorization: Bearer <token>`；
-    令牌由 `POST /api/auth/login` 签发，服务端只存哈希，可过期/撤销。
-  - `--auth-mode demo`：仅本机演示用的降级模式，允许继续用 `?user_id=` 伪身份，
-    启动时会打印警告 —— 只能跑在 127.0.0.1，不得对外。
+  - ``--auth-mode session``（默认）：所有接口都要 Bearer 令牌。
+  - ``--auth-mode demo``：仅本机演示，允许 ``?user_id=`` 伪身份，只能绑定 127.0.0.1。
 
-作用域：所有数据访问都用**会话里的 tenant_id/store_id**，前端传什么都无法越权跨店。
-
-接口一览：
-  POST /api/auth/login                用户名口令登录，返回令牌
-  POST /api/auth/logout               撤销当前令牌
-  GET  /api/auth/me                   当前身份、角色与权限清单
-  GET  /api/bootstrap                 门店、可见任务数、平台数据状态
-  GET  /api/data-status               平台数据新鲜度
-  GET  /api/metrics/summary           统一口径指标摘要（metrics:read）
-  GET  /api/data-quality              数据质量体检（quality:read）
-  GET  /api/reports/daily             店长日报（report:read）
-  GET  /api/tasks/today               今日任务（tasks:read:store / tasks:read:own）
-  GET  /api/tasks/{task_id}           任务详情（越权 403）
-  POST /api/tasks/{task_id}/evidence  提交证据（tasks:evidence:submit）
-  POST /api/tasks/{task_id}/status    推进状态（tasks:accept / tasks:verify）
-  GET  /api/history                   会话历史
-  POST /api/chat                      对话（agent:chat）
+核心接口：
+  POST /api/auth/login / logout
+  GET  /api/auth/me
+  GET  /api/bootstrap / data-status / metrics/summary / data-quality
+  GET  /api/reports/daily / dashboard / reports/weekly / reports/monthly
+  GET  /api/tasks/today / tasks/{task_id}
+  POST /api/tasks/{task_id}/evidence / status
+  GET  /api/approvals / audit / tool-runs
+  GET  /api/history
+  POST /api/chat
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import mimetypes
 import re
 import secrets
@@ -46,6 +42,8 @@ from platform_data import PlatformMetricStore
 from llm_agent import OpenAIToolResponder, ToolCallingAgent
 from reporting import StoreReporter
 from registry import RegistryStore
+from runtime_pages import render_demo_agent_page
+from security import check_integration_config
 from snapshot_builder import load_config
 from store_agent import AgentSessionStore, OpenAICompatibleResponder, StoreOperationsAgent
 from task_store import TaskStore, TaskStoreError
@@ -57,6 +55,25 @@ TASK_ID_RE = re.compile(r"^/api/tasks/([A-Za-z0-9_.\-]{1,120})$")
 TASK_ACTION_RE = re.compile(r"^/api/tasks/([A-Za-z0-9_.\-]{1,120})/(evidence|status)$")
 APPROVAL_DECIDE_RE = re.compile(r"^/api/approvals/(apr-[A-Za-z0-9]{1,60})/decide$")
 WRITE_STATUSES = ("accepted", "done", "verified", "rejected", "canceled", "ready")
+
+CORE_CAPABILITIES = {
+    "full": False,
+    "mfa": False,
+    "admin": False,
+    "callbacks": False,
+    "evidence_upload": False,
+    "outcomes": False,
+}
+
+
+def validate_startup() -> None:
+    """标准库入口只保留核心能力；生产级能力统一走 FastAPI。"""
+    mfa_enforced = os.getenv("STORE_AGENT_MFA_ENFORCE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if mfa_enforced:
+        raise RuntimeError("标准库入口不支持 MFA，请改用 FastAPI 入口 app_fastapi.py")
+    integration = check_integration_config()
+    if not integration["ok"]:
+        raise RuntimeError("生产集成配置未闭合：" + "；".join(integration["problems"]))
 
 
 class AgentHandler(BaseHTTPRequestHandler):
@@ -99,6 +116,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         data = path.read_bytes()
         self._headers(200, mimetypes.guess_type(path.name)[0] or "text/html")
         self.wfile.write(data)
+
+    def _html(self, content: str) -> None:
+        self._headers(200, "text/html; charset=utf-8")
+        self.wfile.write(content.encode("utf-8"))
 
     @property
     def _client_ip(self) -> str:
@@ -204,6 +225,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "llm_mode": ("tool_calling" if self.agent.tool_agent is not None
                              else ("plain" if self.agent.llm_responder is not None else "off")),
                 "data_status": self.tools.data_status() if context.has("metrics:read") else None,
+                "capabilities": dict(CORE_CAPABILITIES),
                 "permissions": sorted(context.permissions),
             })
             return
@@ -413,7 +435,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in ("/", "/agent.html"):
-            self._static(ROOT / "agent.html")
+            self._html(render_demo_agent_page(ROOT / "agent.html"))
         elif parsed.path in ("/dashboard", "/dashboard.html"):
             self._static(ROOT / "dashboard.html")
         elif parsed.path in ("/governance", "/governance.html"):
@@ -458,7 +480,13 @@ class AgentHandler(BaseHTTPRequestHandler):
             password = str(body.get("password", ""))
             store_id = body.get("store_id") or None
             result = self.auth.login(username, password, store_id, actor_ip=self._client_ip)
-            context = result["context"]
+            if result.get("mfa_required"):
+                self._json(501, {"error": "标准库入口不支持 MFA，请改用 FastAPI 入口 app_fastapi.py"})
+                return
+            context = result.get("context")
+            if context is None:
+                self._json(500, {"error": "认证结果缺少会话上下文"})
+                return
             if context.store_id != self.tools.store_id:
                 # 令牌只对签发的门店有效；当前服务只挂载一个门店
                 raise AuthError(f"该账号登录的门店是 {context.store_id}，本服务只服务 {self.tools.store_id}")
@@ -649,6 +677,11 @@ def main() -> None:
     parser.add_argument("--auth-mode", choices=("session", "demo"), default="session",
                         help="session=必须登录（默认）；demo=允许伪身份，仅限本机演示")
     args = parser.parse_args()
+    try:
+        validate_startup()
+    except RuntimeError as exc:
+        print(f"启动失败：{exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
     file_config = load_config(args.config)
     lookup_config = dict(file_config)

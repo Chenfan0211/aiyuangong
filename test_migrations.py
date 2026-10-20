@@ -34,7 +34,7 @@ STORE_CONFIG = ROOT / "store_config.json"
 CORE_TABLES = {
     "stores", "store_configs", "platform_metrics", "package_metrics", "reviews",
     "metric_import_batches", "action_tasks", "task_evidence", "task_events", "users",
-    "memberships", "auth_sessions", "login_attempts", "audit_events", "agent_sessions",
+    "memberships", "channel_bindings", "auth_sessions", "login_attempts", "audit_events", "agent_sessions",
     "agent_messages", "approvals", "agent_tool_runs", "notifications",
     "schema_migrations", "schema_migration_lock",
 }
@@ -113,7 +113,7 @@ class MigrationVersioningTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "status")
         self.assertEqual(payload["current_version"], 0)
         self.assertEqual(payload["expected_version"], pg_sync.MIGRATIONS[-1].version)
-        self.assertEqual([item["version"] for item in payload["pending"]], [1, 2])
+        self.assertEqual([item["version"] for item in payload["pending"]], [item.version for item in pg_sync.MIGRATIONS])
         self.assertFalse(payload["up_to_date"])
         self.assertFalse(payload["locked"])
         self.assertEqual([item["version"] for item in payload["applied"]], [])
@@ -125,7 +125,7 @@ class MigrationVersioningTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["would_write"])
-        self.assertEqual([item["version"] for item in payload["planned"]], [1, 2])
+        self.assertEqual([item["version"] for item in payload["planned"]], [item.version for item in pg_sync.MIGRATIONS])
         self.assertEqual(payload["planned"][0]["action"], "apply")
         self.assertGreater(payload["planned"][0]["statements"], 20)
         self.assertIn("stores", payload["planned"][0]["tables"])
@@ -147,19 +147,19 @@ class MigrationVersioningTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["mode"], "apply")
-        self.assertEqual([item["version"] for item in payload["applied_now"]], [1, 2])
+        self.assertEqual([item["version"] for item in payload["applied_now"]], [item.version for item in pg_sync.MIGRATIONS])
         self.assertFalse(payload["applied_now"][0]["adopted"])
-        self.assertEqual(payload["current_version"], 2)
+        self.assertEqual(payload["current_version"], pg_sync.MIGRATIONS[-1].version)
         self.assertTrue(payload["up_to_date"])
         self.assertTrue(CORE_TABLES <= self.pg_tables(), CORE_TABLES - self.pg_tables())
-        self.assertEqual(self.pg_scalar("select count(*) from schema_migrations"), 2)
+        self.assertEqual(self.pg_scalar("select count(*) from schema_migrations"), len(pg_sync.MIGRATIONS))
         self.assertTrue(self.pg_scalar("select applied_by <> '' from schema_migrations where version = 1"))
         # 恢复点清单必须在改动数据库之前写好
         manifest = Path(payload["recovery"]["manifest"])
         self.assertTrue(manifest.exists(), payload["recovery"])
         self.assertEqual(payload["recovery"]["strategy"], "transactional_ddl")
         record = json.loads(manifest.read_text(encoding="utf-8"))
-        self.assertEqual(record["target_version"], 2)
+        self.assertEqual(record["target_version"], pg_sync.MIGRATIONS[-1].version)
         self.assertEqual(record["sha256"], payload["recovery"]["sha256"])
         self.assertIn("schema_fingerprint", record)
         self.assertEqual(record["inventory"]["tables"], {})
@@ -177,15 +177,15 @@ class MigrationVersioningTests(unittest.TestCase):
         self.assertEqual(payload["applied_now"], [])
         self.assertTrue(payload["up_to_date"])
         self.assertIsNone(payload["recovery"], "无待执行迁移时不写恢复点")
-        self.assertEqual(self.pg_scalar("select count(*) from schema_migrations"), 2)
+        self.assertEqual(self.pg_scalar("select count(*) from schema_migrations"), len(pg_sync.MIGRATIONS))
         self.assertEqual(self.applied_at(1), stamp, "重复 apply 不得刷新已应用版本")
-        self.assertEqual([item["version"] for item in first["applied"]], [1, 2])
+        self.assertEqual([item["version"] for item in first["applied"]], [item.version for item in pg_sync.MIGRATIONS])
 
     def test_apply_adopts_schema_created_by_init(self):
         """历史库（init 建表、无版本行）升级：认领基线而不是重跑 DDL。"""
         self.run_sync("init")
         status = json.loads(self.run_sync("migrate", "--status").stdout)
-        self.assertEqual([item["version"] for item in status["pending"]], [1, 2])
+        self.assertEqual([item["version"] for item in status["pending"]], [item.version for item in pg_sync.MIGRATIONS])
         self.assertTrue(status["pending"][0]["adoptable"])
 
         result = self.run_migrate("--apply")
@@ -264,7 +264,7 @@ class MigrationVersioningTests(unittest.TestCase):
         self.assertEqual(before.returncode, 6, before.stdout[-800:] + before.stderr[-800:])
         payload = json.loads(before.stdout)
         self.assertFalse(payload["ok"])
-        self.assertEqual([item["version"] for item in payload["missing"]], [1, 2])
+        self.assertEqual([item["version"] for item in payload["missing"]], [item.version for item in pg_sync.MIGRATIONS])
         self.assertEqual(payload["checksum_mismatches"], [])
 
         self.run_migrate("--apply")

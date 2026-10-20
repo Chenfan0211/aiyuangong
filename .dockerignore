@@ -6,4 +6,7 @@ evidence
 imports/inbox/*
 config/.env
 .env
+.env.production
+.env.production.*
+!.env.production.example
 .pytest_cache

@@ -26,11 +26,13 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from auth import AuthStore, totp_code
+from platform_data import PlatformMetricStore
 from task_store import TaskStore
 
 root = Path(${JSON.stringify(root)})
 data = Path(${JSON.stringify(dataDir)})
 store_db = data / "store_ops.db"
+metrics_db = data / "platform_metrics.db"
 fixtures_path = data / "fixtures.json"
 auth = AuthStore(store_db, tenant_id="LPL-001")
 fixtures = {
@@ -60,6 +62,28 @@ employee = create_user("employee", "e2e_employee", "Employee-Secure-2026", "E2E 
 create_user("manager", "e2e_manager", "Manager-Secure-2026", "E2E 店长", "manager")
 create_user("owner", "e2e_owner", "Owner-Secure-2026", "E2E 店主", "owner")
 
+metrics = PlatformMetricStore(metrics_db, tenant_id="LPL-001")
+header = ("date,platform,store_id,impressions,detail_views,paid_orders,verified_orders,"
+          "gmv,refunds,review_count,negative_review_count,avg_rating\\n")
+for platform in ("meituan", "douyin"):
+    lines = [header]
+    base = 180 if platform == "meituan" else 140
+    for offset in range(13, -1, -1):
+        day = (datetime.now().date() - timedelta(days=offset)).isoformat()
+        impressions = base + (13 - offset)
+        if offset == 0:
+            impressions = int(impressions * 0.62)
+        views = max(1, int(impressions * 0.23))
+        paid = max(1, int(views * (0.18 if offset else 0.08)))
+        verified = max(1, paid - (3 if offset == 0 else 1))
+        gmv = paid * 120
+        refunds = 3 if offset == 0 else 0
+        negatives = 2 if offset == 0 else 0
+        rating = 3.8 if offset == 0 else 4.8
+        lines.append(f"{day},{platform},WH-LION-001,{impressions},{views},{paid},{verified},{gmv},{refunds},2,{negatives},{rating}\\n")
+    csv_path = data / f"seed-{platform}.csv"
+    csv_path.write_text("".join(lines), encoding="utf-8")
+    metrics.import_csv(csv_path, "WH-LION-001")
 task_store = TaskStore(store_db, tenant_id="LPL-001")
 today = datetime.now().date().isoformat()
 due_at = (datetime.now() + timedelta(days=1)).isoformat(timespec="seconds")

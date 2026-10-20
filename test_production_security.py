@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -42,24 +43,31 @@ class ProductionDocsTests(unittest.TestCase):
             self.assertIn("x-request-id", {key.lower() for key in metrics.headers})
 
     def test_production_disables_openapi_docs(self):
-        old = os.environ.get("STORE_AGENT_ENV")
-        os.environ["STORE_AGENT_ENV"] = "production"
-        try:
-            with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            env = {
+                "STORE_AGENT_ENV": "production",
+                "STORE_AGENT_MFA_ENFORCE": "1",
+                "STORE_AGENT_MFA_KEY": "mfa-" + "x" * 48,
+                "POSTGRES_PASSWORD": "db-" + "p" * 40,
+                "DOMAIN": "ops.shizizuo.cn",
+                "ACME_EMAIL": "ops@shizizuo.cn",
+                "STORE_AGENT_BASE_URL": "https://ops.shizizuo.cn",
+                "STORE_AGENT_EVIDENCE_DIR": str(root_path / "evidence"),
+                "STORE_AGENT_IMPORT_INBOX": str(root_path / "imports"),
+                "STORE_AGENT_BACKUP_LOCAL_ROOT": str(root_path / "backups"),
+                "STORE_AGENT_OPS_LOCK": str(root_path / "ops.lock"),
+            }
+            with patch.dict(os.environ, env, clear=False):
                 app = app_fastapi.create_app(
                     config_path=Path(app_fastapi.__file__).resolve().parent / "store_config.json",
-                    metrics_db=Path(root) / "metrics.db",
-                    store_db=Path(root) / "store.db",
-                    chat_db=Path(root) / "chat.db",
+                    metrics_db=root_path / "metrics.db",
+                    store_db=root_path / "store.db",
+                    chat_db=root_path / "chat.db",
                 )
-                client = TestClient(app)
-                self.assertEqual(client.get("/openapi.json").status_code, 404)
-                self.assertEqual(client.get("/docs").status_code, 404)
-        finally:
-            if old is None:
-                os.environ.pop("STORE_AGENT_ENV", None)
-            else:
-                os.environ["STORE_AGENT_ENV"] = old
+            client = TestClient(app)
+            self.assertEqual(client.get("/openapi.json").status_code, 404)
+            self.assertEqual(client.get("/docs").status_code, 404)
 
 
 if __name__ == "__main__":

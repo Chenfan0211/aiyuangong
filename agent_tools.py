@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+from analysis import StoreAnalysis
 from auth import has_permission
 from platform_data import PLATFORMS, PlatformMetricStore
 from snapshot_builder import parse_target_date
@@ -49,6 +50,7 @@ class StoreTools:
         self.metric_store = metric_store
         self.task_store = task_store
         self.config_path = Path(config_path) if config_path else None
+        self.analysis = StoreAnalysis(self.config, self.metric_store, config_path=self.config_path)
         self.store_id = str(config.get("store_id") or "")
         if not self.store_id:
             raise ValueError("门店配置缺少 store_id")
@@ -142,6 +144,35 @@ class StoreTools:
             fresh_days=self.fresh_days,
             jump_alert_percent=self.jump_alert_percent,
         )
+
+    def period_comparison(
+        self,
+        user: dict[str, Any],
+        anchor: Any = "auto",
+        windows: Any = ("day", "week"),
+        platform: Optional[str] = None,
+        metric: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """双口径周期对比；财务字段按角色权限真实裁剪。"""
+        if not self._can(user, "metrics:read"):
+            raise PermissionDenied("无权查看经营指标")
+        return self.analysis.compare(
+            anchor=anchor, windows=windows, platform=platform, metric=metric,
+            include_financial=self.can_read_financial(user),
+        )
+
+    def diagnose_store_change(
+        self,
+        user: dict[str, Any],
+        comparison: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """在周期对比结果上做确定性经营归因。"""
+        if not self._can(user, "metrics:read"):
+            raise PermissionDenied("无权查看经营指标")
+        if comparison is None:
+            comparison = self.period_comparison(user, **kwargs)
+        return self.analysis.diagnose(comparison)
 
     def tasks_for(
         self,

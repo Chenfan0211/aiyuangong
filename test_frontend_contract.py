@@ -54,6 +54,12 @@ class FrontendContractTests(unittest.TestCase):
             self.assertIn("StoreSession", source, path.name)
             self.assertIn("createClient", source, path.name)
 
+    def test_agent_supports_task_details_and_advice_rendering(self):
+        source = self.read("static/agent.js")
+        for marker in ("task-detail", "查看详情", "收起", "advice", "advice-block", "优先动作"):
+            self.assertIn(marker, source)
+
+
     def test_agent_has_mfa_and_expired_session_recovery(self):
         html = self.read("agent.html")
         source = self.read("static/agent.js")
@@ -62,6 +68,30 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("/api/auth/mfa/verify", source)
         self.assertIn("登录已过期", source)
         self.assertIn("showLogin", source)
+
+    def test_agent_declares_capability_driven_navigation(self):
+        html = self.read("agent.html")
+        source = self.read("static/agent.js")
+        self.assertIn('id="settingsLink"', html)
+        self.assertIn("bootstrap", source)
+        self.assertIn("capabilities", source)
+        self.assertIn("settingsLink", source)
+        self.assertIn("admin", source)
+        self.assertIn("evidence_upload", source)
+        self.assertIn("hasCapability", source)
+
+    def test_demo_login_prefill_is_opt_in_and_escaped(self):
+        from runtime_pages import render_demo_agent_page
+
+        page = ROOT / "agent.html"
+        empty = render_demo_agent_page(page, env={})
+        self.assertNotIn('value="e2e_owner"', empty)
+        rendered = render_demo_agent_page(page, env={
+            "STORE_AGENT_DEMO_PREFILL_USER": "e2e_owner",
+            "STORE_AGENT_DEMO_PREFILL_PASSWORD": 'Owner"Secure',
+        })
+        self.assertIn('value="e2e_owner"', rendered)
+        self.assertIn('value="Owner&quot;Secure"', rendered)
 
     def test_settings_patch_uses_revision_optimistic_lock(self):
         source = self.read("static/settings.js")

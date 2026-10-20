@@ -50,6 +50,7 @@
     "webhook_nonces": 1,
     "users": 0,
     "memberships": 0,
+    "channel_bindings": 730,
     "stores": 0,
     "store_configs": 0
   }

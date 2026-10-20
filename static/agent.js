@@ -3,6 +3,7 @@ const input = document.getElementById('input');
 const send = document.getElementById('send');
 const StoreSession = window.StoreSession;
 let currentPermissions = [];
+let currentCapabilities = {};
 let authenticated = false;
 let mfaToken = '';
 let securityPending = false;
@@ -114,6 +115,21 @@ function applyIdentity(context) {
     document.getElementById('currentRole').textContent = (user.role_label || user.role) + ' · ' + (source.store_id || '');
   }
 }
+
+function applyCapabilities(capabilities) {
+  const caps = capabilities || {};
+  currentCapabilities = caps;
+  setNodeHidden('settingsLink', caps.admin === false);
+  const note = document.querySelector('#appLinks .demo');
+  if (note && caps.full === false) {
+    note.textContent = '当前为兼容入口，仅提供核心功能；完整管理、MFA 与证据上传请使用 FastAPI 入口。';
+  }
+}
+
+function hasCapability(name) {
+  return currentCapabilities[name] !== false;
+}
+
 
 async function beginMfaEnrollment() {
   if (mfaEnrollmentStarted) return;
@@ -360,6 +376,81 @@ async function logout() {
   showLogin('已退出登录');
 }
 
+function formatTaskTarget(target) {
+  if (!target) return '未配置';
+  const labels = {
+    metric: '指标', operator: '条件', threshold: '阈值', value: '目标值', window: '窗口',
+    platform: '平台', package_id: '套餐', category: '类别', name: '名称', target: '目标',
+  };
+  if (Array.isArray(target)) return target.map(item => String(item)).join('；') || '未配置';
+  if (typeof target !== 'object') return String(target);
+  const parts = Object.entries(target)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    .map(([key, value]) => `${labels[key] || key}：${typeof value === 'object' ? JSON.stringify(value) : value}`);
+  return parts.join('；') || '未配置';
+}
+
+function appendDetailRow(parent, label, value) {
+  const row = document.createElement('div');
+  row.className = 'detail-row';
+  const key = document.createElement('b');
+  key.textContent = label;
+  const text = document.createElement('span');
+  text.textContent = value || '未提供';
+  row.append(key, text);
+  parent.appendChild(row);
+}
+
+function renderTaskDetail(container, task) {
+  container.textContent = '';
+  appendDetailRow(container, '任务编号', task.task_id);
+  appendDetailRow(container, '分类', task.category || '未分类');
+  appendDetailRow(container, '目标', formatTaskTarget(task.target));
+  appendDetailRow(container, '生成依据', task.reason);
+  appendDetailRow(container, '需要提交的证据', (task.evidence_required || []).join('、') || '无额外证据要求');
+  appendDetailRow(container, '审批要求', task.approval_required || task.requires_approval ? '需要审批' : '无需审批');
+  appendDetailRow(container, '当前状态', task.status || '-');
+  const evidence = task.evidence || [];
+  if (evidence.length) {
+    appendDetailRow(container, '已提交证据', evidence.slice(-5).map(item => `${item.evidence_type || '证据'}：${item.object_ref || '-'}`).join('；'));
+  }
+  const events = task.events || [];
+  if (events.length) {
+    appendDetailRow(container, '最近事件', events.slice(-5).map(item => `${item.from_status || '创建'} → ${item.to_status || '-'}（${item.actor_id || '系统'}）`).join('；'));
+  }
+}
+
+function renderAdvice(advice) {
+  const block = document.createElement('div');
+  block.className = 'advice-block';
+  const title = document.createElement('b');
+  title.textContent = '经营建议（优先动作）：' + (advice.headline || '请结合数据核实');
+  block.appendChild(title);
+  const list = document.createElement('ol');
+  (advice.actions || []).forEach(action => {
+    const item = document.createElement('li');
+    const main = document.createElement('span');
+    main.textContent = action.title || '';
+    item.appendChild(main);
+    const detail = document.createElement('small');
+    detail.textContent = `责任角色：${action.owner_role || '-'}｜证据：${action.evidence || '-'}｜观察指标：${action.metric || '-'}｜需审批：${action.approval_required ? '是' : '否'}`;
+    item.appendChild(detail);
+    list.appendChild(item);
+  });
+  block.appendChild(list);
+  if ((advice.missing_data || []).length) {
+    const missing = document.createElement('p');
+    missing.textContent = '缺失数据：' + advice.missing_data.join('；');
+    block.appendChild(missing);
+  }
+  if ((advice.watch || []).length) {
+    const watch = document.createElement('small');
+    watch.textContent = '观察指标：' + advice.watch.join('、');
+    block.appendChild(watch);
+  }
+  return block;
+}
+
 function addMessage(role, text, meta) {
   const details = meta || {};
   document.getElementById('welcome')?.remove();
@@ -374,6 +465,7 @@ function addMessage(role, text, meta) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = escapeText(text);
+  if (details.advice) bubble.appendChild(renderAdvice(details.advice));
   if ((details.sources && details.sources.length) || details.approval) {
     const tags = document.createElement('div');
     tags.className = 'meta';
@@ -426,6 +518,7 @@ async function bootAll(prefetched) {
     ? '可查看全店任务、经营指标与日报；高风险动作仍需审批。'
     : '只查看本人任务、操作步骤与非敏感聚合数据。';
   const boot = await getJson('/api/bootstrap');
+  applyCapabilities(boot.capabilities);
   document.getElementById('taskCount').textContent = `${me.user.role_label}权限 · 今日可见 ${boot.task_count} 项任务`;
   document.getElementById('serviceStatus').textContent = boot.llm_enabled ? '对话 Agent 在线 · 大模型已接入' : '对话 Agent 在线 · 规则模式';
   renderPlatformStatus('meituan', boot.data_status?.platforms?.meituan);
@@ -472,12 +565,34 @@ function taskCard(task) {
   const sub = document.createElement('div');
   sub.className = 's';
   sub.textContent = task.assignee_id + ' · 截止 ' + String(task.due_at || '').slice(5, 16).replace('T', ' ') + ' · ' + task.status;
-  card.append(prio, title, sub);
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'ghost task-toggle';
+  toggle.textContent = '查看详情';
+  const detail = document.createElement('div');
+  detail.className = 'task-detail';
+  detail.hidden = true;
+  let detailLoaded = false;
+  toggle.onclick = async () => {
+    detail.hidden = !detail.hidden;
+    toggle.textContent = detail.hidden ? '查看详情' : '收起';
+    if (detail.hidden || detailLoaded) return;
+    try {
+      const full = await getJson('/api/tasks/' + encodeURIComponent(task.task_id));
+      renderTaskDetail(detail, full);
+      detailLoaded = true;
+    } catch (error) {
+      detail.textContent = '任务详情读取失败：' + error.message;
+    }
+  };
+  card.append(prio, title, sub, toggle, detail);
   const acts = document.createElement('div');
   acts.className = 'acts';
   if (task.status === 'ready') acts.appendChild(actionButton(task, 'accept', '接受任务'));
   if (task.status === 'accepted') {
-    acts.appendChild(actionButton(task, 'image', '上传图片证据'));
+    if (hasCapability('evidence_upload')) {
+      acts.appendChild(actionButton(task, 'image', '上传图片证据'));
+    }
     acts.appendChild(actionButton(task, 'complete', '提交证据并完成'));
   }
   card.appendChild(acts);
@@ -640,7 +755,7 @@ async function ask(message) {
   send.disabled = true;
   try {
     const data = await postJson('/api/chat', { session_id: sessionId, message: clean });
-    addMessage('assistant', data.answer, { sources: data.sources, approval: data.requires_approval });
+    addMessage('assistant', data.answer, { sources: data.sources, approval: data.requires_approval, advice: data.advice });
   } catch (error) {
     addMessage('assistant', '暂时无法回答：' + error.message, { error: true });
   } finally {

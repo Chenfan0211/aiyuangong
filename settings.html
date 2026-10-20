@@ -49,6 +49,19 @@
       </form>
       <div class="scroll"><table><thead><tr><th>用户名</th><th>姓名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id="memberBody"></tbody></table></div>
     </section>
+    <section id="bindingSection">
+      <div class="section-head"><h2>聊天账号绑定</h2><button id="refreshBindings" class="ghost" type="button">刷新绑定</button></div>
+      <p class="hint">把外部聊天账号（mock / 企业微信 / 飞书）绑定到门店成员，绑定成功后该账号发消息即可查询本店经营数据。仅店主可管理。</p>
+      <form id="bindingForm" class="form">
+        <label>渠道<select id="bindingProvider" required><option value="mock">mock</option><option value="wecom">企业微信</option><option value="feishu">飞书</option></select></label>
+        <label>外部用户 ID<input id="bindingExternalId" required maxlength="128" /></label>
+        <label>门店成员<select id="bindingUser" required></select></label>
+        <label>手机号（可选）<input id="bindingMobile" inputmode="numeric" autocomplete="off" /></label>
+        <label>显示名（可选）<input id="bindingName" maxlength="64" /></label>
+        <button type="submit">创建绑定</button>
+      </form>
+      <div class="scroll"><table><thead><tr><th>渠道</th><th>外部 ID</th><th>成员</th><th>手机号</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="bindingBody"></tbody></table></div>
+    </section>
   </main>
 </div>
 <script src="/static/session-client.js"></script>

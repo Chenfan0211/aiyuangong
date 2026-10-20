@@ -5,7 +5,7 @@
 - 门店：武汉狮子座店（`store_id = WH-LION-001`）
 - 形态：单店生产化加固版本，支持 FastAPI + PostgreSQL、云主机 HTTPS、管理岗 TOTP、图片证据和 owner 管理后台
 - 技术栈：Python 3.12 + FastAPI + PostgreSQL 16 + Docker Compose + Caddy
-- 当前验证基线：**418 个 Python 用例 + 22 个 Playwright 浏览器用例全部通过**
+- 当前验证基线：**499 个 Python 用例 + 30 个 Playwright 浏览器用例全部通过**
 - 生产化落地状态与未闭环边界见 `PRODUCTION_READINESS.md`
 
 ---
@@ -71,7 +71,7 @@ python -m unittest discover -p "test_*.py"     # Windows
 python3 -m unittest discover -p "test_*.py"    # macOS / Linux
 ```
 
-当前基线：**418 个 Python 用例 + 22 个 Playwright 浏览器用例全部通过**（含 FastAPI、PostgreSQL 迁移/等价性/RLS、两套传输层的治理与看板接口、推送与大模型工具调用均用本地桩实测 HTTP）。
+当前基线：**499 个 Python 用例 + 30 个 Playwright 浏览器用例全部通过**（含 FastAPI 完整接口契约、PostgreSQL 迁移/等价性/RLS、标准库核心备用入口、推送与大模型工具调用均用本地桩实测 HTTP）。
 
 ---
 
@@ -151,8 +151,22 @@ Register-ScheduledTask -TaskName '门店运营系统-每日同步' -Action $acti
 
 导入失败时会给出具体行号与原因（字段缺失、门店不匹配、重复记录、数值非法、平台不支持、时间格式错误、文件非 UTF-8）。
 
+生产 Compose 环境不要在宿主机直接运行上面的脚本；每日任务使用 `docker compose --profile ops run --rm ops`，由容器复用 PostgreSQL、证据、导入和备份卷。
+
 > **红线**：不使用爬虫、不绕过平台限制、不抓取顾客隐私数据；没有接口就用官方导出。
 
+### 3.6 入站消息与周期归因（第一阶段）
+
+第一阶段提供“消息进入 → 账号绑定 → 周期对比 → 经营归因 → 带依据回答”的只读闭环：
+
+- 网页对话继续使用现有登录；外部消息走 `POST /api/inbound/messages/{provider}`，需配置 `STORE_AGENT_INBOUND_SIGNING_SECRET`。
+- 外部账号必须先由店主在“设置与成员 → 聊天账号绑定”绑定到本店成员，未绑定账号不会返回任何经营数据。
+- 周期对比接口：`GET /api/analysis/compare?anchor=auto&window=day,week&platform=meituan`。
+- 对话可直接问“对比昨天和前7天数据，为什么订单下降？”，回答包含可能原因、证据、置信度和数据来源。
+- 财务字段仍按 `metrics:read:financial` 权限从数据结构中裁剪；缺日或过期数据会阻断确定原因。
+- 当前只实现通用签名 Webhook 与 mock 契约，真实企微/飞书入站适配器留到下一阶段。
+
+`provider` 推荐使用 `mock` 做本地契约联调；签名头为 `X-Store-Signature`、`X-Store-Timestamp`、`X-Store-Nonce`，签名算法与现有 Webhook 一致。
 ## 4. 快照、计划与任务
 
 规则引擎的输入不再是手填的 `sample_input.json`，而是由 `snapshot_builder.py` 从**数据库 + `store_config.json`** 组装；除成本、目标、责任人这类平台拿不到的字段外，快照里的经营数字全部自动来自已落库数据。
@@ -195,26 +209,23 @@ python store_cli.py overdue
 
 对话界面 <http://127.0.0.1:8766/>（`agent.html`）：顶部显示各平台数据新鲜度与数据质量，中部是"今日三件事"卡片（可直接接受任务、提交证据并完成），右上角一键生成今日日报。
 
-`store_agent.py` 的意图路由是**显式规则表**（`INTENT_RULES`），关键词是数据而不是 if/elif 分支，便于审查与加词；时间范围、平台、指标按槽位解析（如"近30天美团曝光"→ days=30 / meituan / impressions）。支持意图：今日任务、任务依据、任务完成情况、执行 SOP、评价与差评、套餐诊断、平台指标、数据齐不齐、哪天缺数、今日日报；未命中且配置了大模型时走兜底。
+`store_agent.py` 的意图路由是**显式规则表**（`INTENT_RULES`），关键词是数据而不是 if/elif 分支，便于审查与加词；时间范围、平台、指标按槽位解析（如"近30天美团曝光"→ days=30 / meituan / impressions）。支持意图：周期对比、经营归因、今日任务、任务依据、任务完成情况、执行 SOP、评价与差评、套餐诊断、平台指标、数据齐不齐、哪天缺数、今日日报；未命中且配置了大模型时走兜底。
 
 ### 5.1 接口
 
-| 方法 | 路径 | 权限 |
-|---|---|---|
-| POST | `/api/auth/login` | 公开（用户名 + 口令） |
-| POST | `/api/auth/logout` | 已登录 |
-| GET | `/api/auth/me` | 已登录 |
-| GET | `/api/bootstrap` | 已登录 |
-| GET | `/api/data-status` | metrics:read |
-| GET | `/api/metrics/summary` | metrics:read（财务字段需 metrics:read:financial） |
-| GET | `/api/data-quality` | quality:read |
-| GET | `/api/reports/daily` | report:read |
-| GET | `/api/tasks/today` | tasks:read:store 看全店；tasks:read:own 只看本人 |
-| GET | `/api/tasks/{task_id}` | 同上；越权 403 |
-| GET | `/api/history` | 会话所属用户 |
-| POST | `/api/chat` | agent:chat（身份按会话绑定） |
-| POST | `/api/tasks/{task_id}/evidence` | 任务负责人或店长 |
-| POST | `/api/tasks/{task_id}/status` | `accepted`/`done` 由负责人；`verified`/`rejected` 仅店长 |
+FastAPI 是完整接口的唯一权威入口。开发环境启动后打开 <http://127.0.0.1:8766/docs> 查看 OpenAPI；当前共有 50 条 `/api/*` 路由，按能力分组如下：
+
+- 认证与账户安全：登录、MFA 验证、临时口令修改、登出、当前身份。
+- 管理后台：成员与角色、门店配置 revision、运维运行与重试队列。
+- 数据与报表：数据新鲜度、指标摘要（财务字段按权限裁剪）、数据质量、周期对比、日报/周报/月报、经营看板。
+- 任务与结果：今日任务、任务详情、证据文本/图片上传、反馈、D+7/D+28 结果、状态流转。
+- 治理：审批列表/申请/决策、审计流水、工具调用留痕。
+- 对话与回调：会话历史、Agent 对话、飞书/企微/mock 审批回调。
+- 运维：`/livez`、`/readyz`、`/metrics`。
+
+接口集合由 `test_api_coverage.py` 的路由契约测试锁定，避免文档继续手工维护一份容易过期的完整路径表。标准库备用入口只提供核心子集，能力边界见第 7.1 节。
+
+任务卡支持展开查看目标、生成依据、证据要求和事件轨迹；`POST /api/chat` 在建议类问题上会额外返回结构化 `advice`（结论、优先动作、证据、观察指标和缺失数据），没有大模型 Key 时也由规则引擎生成。
 
 ### 5.2 身份与权限
 
@@ -295,36 +306,36 @@ python agent_server.py --auth-mode demo   # 会打印醒目警告，允许用 ?u
 
 ## 7. FastAPI 与 PostgreSQL（二期批次 8）
 
-### 7.1 两个可用的服务入口
+### 7.1 两个服务入口
 
-| 入口 | 依赖 | 适用 |
+| 入口 | 依赖 | 定位 |
 |---|---|---|
-| `agent_server.py` | **仅标准库** | 一期环境、无网络机器、故障排查备用 |
-| `app_fastapi.py` | FastAPI + uvicorn | 推荐：自带 OpenAPI 文档与请求校验 |
+| `app_fastapi.py` | FastAPI + uvicorn | **生产和完整能力入口**：带 OpenAPI、MFA、管理后台、回调、图片证据和结果归因 |
+| `agent_server.py` | 仅标准库 | **核心备用入口**：认证、基础指标/任务/审批/看板和对话；不承诺与 FastAPI 全量对齐 |
 
 ```bash
 # FastAPI（推荐）：默认 session 认证，接口文档 http://127.0.0.1:8766/docs
 python -m uvicorn app_fastapi:create_app --factory --host 127.0.0.1 --port 8766
 
-# 或直接用内置启动器（等价，可传 --config/--auth-mode 等参数）
+# 或直接用内置启动器（可传 --config/--auth-mode 等参数）
 python app_fastapi.py --port 8766
 
-# 标准库版（零依赖）
+# 标准库备用入口（核心功能；启用 MFA 时会拒绝启动）
 python agent_server.py
 ```
 
-两个入口**行为等价**：同一套 `auth.py` / `agent_tools.py` / `task_store.py` 逻辑，同样的接口路径、
-同样的错误码（无令牌 401 / 权限不足 403 / 任务状态冲突 409 / 口令锁定 423），因此 `agent.html` 两边通用。
-等价性由 `test_fastapi_api.py`（11 个用例）与 `test_auth_api.py`（9 个用例）分别覆盖。
+标准库入口不实现 MFA 接管、管理后台、审批回调、图片证据上传和 D+7/D+28 结果模块。启用 `STORE_AGENT_MFA_ENFORCE` 时必须在 `main()` 启动阶段改用 FastAPI，避免登录接口返回 500。`/api/bootstrap` 会返回 `capabilities` 字段，供 `agent.html` 隐藏当前入口不支持的入口。完整路由契约由 `test_api_coverage.py` 和 `test_agent_server_contract.py` 锁定。
+
+生产环境启动前还会校验 `POSTGRES_PASSWORD`、`DOMAIN`、`ACME_EMAIL`、公网 `STORE_AGENT_BASE_URL` 以及证据、导入、备份、锁路径；占位符或缺失配置会拒绝启动，并可由 `python store_cli.py gate-check` 提前发现。
 
 ### 7.2 PostgreSQL 落地
 
 `schema.sql` 已重写为**权威 PostgreSQL 16+ 数据模型**，分两段：
 
-- **A. 已落地（16 张表）**：`stores`、`store_configs`、`platform_metrics`、`package_metrics`、`reviews`、
-  `metric_import_batches`、`action_tasks`、`task_evidence`、`task_events`、`users`、`memberships`、
-  `auth_sessions`、`login_attempts`、`audit_events`、`agent_sessions`、`agent_messages`；
-- **B. 规划中（7 张表）**：连接器、指标长表、审批中心等，**不会被 `init` 创建**。
+- **A. 已落地（26 张表）**：迁移元数据、门店与配置、平台指标/套餐/评价、任务与证据、身份/MFA/会话、审批/回调/通知、审计/工具留痕和运维运行等表；
+- **B. 规划中（5 张表）**：连接器、指标长表、规则库等，**不会被 `init` 创建**。
+
+当前 `schema.sql` 共声明 31 张表；`pg_sync.py` 和数据库迁移会读取其中的已落地部分，不再存在“代码未使用 schema.sql”的说法。
 
 ```bash
 # 建表（幂等，可重复执行）+ 从 SQLite 迁移 + 对账，一条命令
@@ -339,13 +350,13 @@ python pg_sync.py --dsn "..." --only platform_metrics etl   # 只处理某张表
 
 **已用真实 PostgreSQL 16.2 验证**（`test_pg_sync.py`，7 个用例）：
 
-- 27 条 DDL 幂等执行通过，16 张已落地表全部创建；
-- 14 张运行表全量迁移，**行数逐表一致**；
+- 已落地表的 DDL 迁移可幂等执行，全部创建成功；
+- 运行表全量迁移，**行数逐表一致**；
 - **7 项业务口径对账一致**：GMV（831.50）、支付订单、差评数、平台行数、待处理差评、未关闭任务、已验收任务；
 - 类型正确落地：`target`/`evidence_required` 为 jsonb（读回即 dict/list）、`approval_required` 为 boolean、
   `due_at` 为带时区的 timestamptz、金额为 `numeric(12,2)`；
 - 迁移幂等：重复执行不产生重复行；
-- **租户隔离落地**：16 张表全部带 `tenant_id`，除 `audit_events` 外均为 `NOT NULL`
+- **租户隔离落地**：已落地租户表均带 `tenant_id`，除 `audit_events` 外均为 `NOT NULL`
   （该例外是刻意的：未知用户名的失败登录无法归属租户，已在 `schema.sql` 注明）。
 
 ### 7.3 运行时已支持 PostgreSQL（批次 8b）
@@ -532,7 +543,7 @@ python store_cli.py notify-history             # 查看推送记录
 
 ```
 门店运营系统\
-├─ agent_server.py          本地演示 HTTP 服务（8 个 GET + 3 个 POST，仅 127.0.0.1）
+├─ agent_server.py          标准库核心备用入口（非完整等价，仅 127.0.0.1）
 ├─ store_agent.py           对话与权限内核（意图规则表、槽位解析、角色可见性、高风险拦截）
 ├─ prototype.py             规则引擎：由经营快照生成动作草稿（纯函数，不产生副作用）
 ├─ platform_data.py         SQLite 统一指标库（校验、幂等批次、新鲜度、周期对比）
@@ -543,7 +554,7 @@ python store_cli.py notify-history             # 查看推送记录
 ├─ store_config.json        唯一人工维护的配置（成本/目标/周期/责任人/阈值）
 ├─ db.py                    SQLite 连接工具（提交/回滚后必定关闭）
 ├─ auth.py                  身份/会话/RBAC/审计/脱敏（框架无关的安全核心）
-├─ app_fastapi.py           FastAPI 入口（带 OpenAPI 文档，与 agent_server 行为等价）
+├─ app_fastapi.py           FastAPI 完整生产入口（带 OpenAPI 文档）
 ├─ pg_sync.py               PostgreSQL 落地：建表 / SQLite→PG 迁移 / 对账
 ├─ agent_tools.py           只读工具集：指标/数据质量/任务/日报 + 角色可见性
 ├─ governance.py            审批流 / 工具调用留痕 / 审计查询
@@ -557,7 +568,7 @@ python store_cli.py notify-history             # 查看推送记录
 ├─ dashboard.html           经营看板界面
 ├─ governance.html          审批与审计中心界面
 ├─ scripts\daily_sync.ps1   每日同步：导入 → 体检 → 派单 → 状态与摘要
-├─ schema.sql               PostgreSQL 生产数据模型（二期迁移依据，当前代码未使用）
+├─ schema.sql               PostgreSQL 权威数据模型（由 pg_sync 建表/迁移使用）
 ├─ agent.html               对话界面
 ├─ index.html               试点方案文档（十一章，填写项存 localStorage）
 ├─ sample_input.json        最初的演示快照（仅 Agent 演示兼容模式使用，生产走 snapshot_builder）
@@ -569,7 +580,7 @@ python store_cli.py notify-history             # 查看推送记录
 │  └─ inbox\                人工放导出文件的位置（内容不入库）
 ├─ config\env.example       环境变量样例（大模型为可选项）
 ├─ data\                    运行时生成，已忽略：*.db / logs\ / outbox\（推送草稿）
-└─ test_*.py                单元测试（22 个文件 / 253 个用例）
+└─ test_*.py                单元测试；当前完整基线与用例数见 PRODUCTION_READINESS.md
 ```
 
 ---
@@ -726,7 +737,7 @@ python store_cli.py purge --apply --export data/archive   # 先归档待删行�
 |---|---|
 | 2026-10-18 | 批次 1：修复 SQLite 连接泄漏（16/16 测试在 Windows 全绿）；新增 `README.md`、`requirements.txt`、`.gitignore`、`config/env.example`、`imports/inbox/` 占位 |
 | 2026-10-18 | 批次 15（P0 #6 收口）：新增 `retention.py` 数据保留与删除策略（20 张表逐表期限、默认只出计划、`--apply` 才删、先归档再删、`retention_purge` 审计）；`store_config.json` 写入 retention 段；CLI 新增 `retention-plan` / `purge`；`gate-check` 增加"保留策略已配置"检查；新增 13 个测试（253/253 通过） |
-| 2026-10-18 | 生产化加固：CLI 编码、严格 CSP、TOTP MFA、HttpOnly Cookie、租户级备份/保留期、按规则数据就绪闸门、Docker Compose + Caddy、健康检查、图片证据、管理后台、任务验收与 D+7/D+28 结果模块；316 个用例全部通过 |
+| 2026-10-18 | 生产化加固：CLI 编码、严格 CSP、TOTP MFA、HttpOnly Cookie、租户级备份/保留期、按规则数据就绪闸门、Docker Compose + Caddy、健康检查、图片证据、管理后台、任务验收与 D+7/D+28 结果模块；完整回归基线见 `PRODUCTION_READINESS.md` |
 | 2026-10-18 | 批次 14（P0 闸门）：新增 `ops_backup.py`（逻辑备份/恢复/演练，内容哈希对账，PG 演练用临时数据库）与 `security.py`（Webhook 验签+nonce 重放防护、凭据轮换清单与 PostgreSQL 口令轮换、危险能力与明文密钥自检）；`store_cli.py` 新增 `backup/restore/drill/gate-check`；P0 十项闸门全部有可复现验证；新增 27 个测试（240/240 通过） |
 | 2026-10-18 | 批次 13（二期-7）：新增 `llm_agent.py`（OpenAI 兼容工具调用：8 个只读工具 + 按角色过滤 + 调度容错 + `agent_tool_runs`/审计留痕 + 轮次上限）；`store_agent` 兜底路径优先走工具调用并可优雅降级；两套传输层与 `/api/bootstrap` 暴露 `llm_mode`；新增 14 个测试（213/213 通过，模型侧用本地兼容桩实测 HTTP） |
 | 2026-10-18 | 批次 12（二期-6）：新增 `notify.py`（日报/逾期/待审批/质量四类消息 + 飞书/企微/outbox 三通道 + 发送账本幂等）与 `notifications` 表；`store_cli.py` 新增 `notify`/`notify-history`；`daily_sync.ps1` 接入日报推送（默认草稿）；新增 16 个测试（199/199 通过） |
@@ -734,7 +745,7 @@ python store_cli.py purge --apply --export data/archive   # 先归档待删行�
 | 2026-10-18 | 批次 11（二期-5）：新增 `reporting.py`（看板数据 + 周报/月报）与 `dashboard.html` 看板界面；两套传输层各加 3 个接口（`/api/dashboard`、`/api/reports/weekly`、`/api/reports/monthly`）并接入工具留痕；`store_cli.py` 新增 dashboard/weekly/monthly；新增 15 个测试（175/175 通过） |
 | 2026-10-18 | 批次 9（二期-3）：新增 `governance.py`（审批流 + 工具调用留痕 + 审计查询）与 `governance.html` 审批/审计界面；`approvals`、`agent_tool_runs` 从规划表提升为已落地表；新增 `approvals:request` 权限；两套传输层各加 5 个治理接口并接入工具留痕；`store_cli.py` 新增 approvals/decide/request/audit 与派单自动开审批单；新增 30 个测试（160/160 通过） |
 | 2026-10-18 | 批次 8b（二期-2 续）：`db.py` 升级为双引擎方言层（占位符翻译、行规范化、RETURNING id、方言 DDL/补列、会话时区）；四个 store 与全部 CLI/服务入口都接受 `postgresql://` DSN；`schema.sql` 增补运行时唯一索引与 `tenant_id` 默认值；新增 3 个跨引擎等价性测试（130/130 通过）；实测导入/派单/服务/任务闭环全部在真实 PostgreSQL 16.2 上跑通 |
-| 2026-10-18 | 批次 8（二期-2）：`schema.sql` 重写为权威 PostgreSQL 16 模型（16 张已落地 + 7 张规划中，逐表 `tenant_id`）；新增 `pg_sync.py`（建表/迁移/对账）并用真实 PostgreSQL 16.2 验证（27 条 DDL、14 表行数一致、7 项业务口径一致）；新增 `app_fastapi.py` FastAPI 入口（OpenAPI、与 stdlib 版行为等价）；新增 18 个测试（127/127 通过） |
+| 2026-10-18 | 批次 8（二期-2）：`schema.sql` 重写为权威 PostgreSQL 16 模型（已落地段与规划段分开、逐表 `tenant_id`）；新增 `pg_sync.py`（建表/迁移/对账）并用真实 PostgreSQL 16.2 验证（DDL、行数一致、7 项业务口径一致）；新增 `app_fastapi.py` FastAPI 入口（OpenAPI）；新增 18 个测试（127/127 通过） |
 | 2026-10-18 | 批次 7（二期-1）：新增 `auth.py`（scrypt 口令、随机令牌仅存哈希、12h TTL+滑动续期、登录节流锁定、RBAC 权限点、租户/门店作用域、审计与脱敏）；服务端改为 Bearer 令牌鉴权并新增 `/api/auth/login|logout|me`，默认 `session` 模式；`store_cli.py` 新增 `auth-init`/`auth-list`/`auth-audit`；`agent.html` 改为登录制；新增 32 个测试（109/109 通过） |
 | 2026-10-18 | 批次 6：Agent 意图改为显式规则表 + 槽位解析；新增 `agent_tools.py` 只读工具集（指标/数据质量/任务/日报）与结构化依据；`agent_server.py` 新增 6 个接口（任务、质量、日报）并接入会话绑定与写操作门禁；`agent.html` 增加今日三件事、数据质量条、日报按钮；`daily_sync.ps1` 串联导入→体检→派单；新增 24 个测试（76/76 通过） |
 | 2026-10-18 | 批次 5：新增 `snapshot_builder.py`（数据+配置→规则输入，取代手填快照）、`task_store.py`（任务/证据/事件/会话，指纹去重 + 状态机 + 逾期扫描）、`store_cli.py`、`store_config.json`；连接实现收敛到 `db.py`；新增 17 个测试（52/52 通过） |

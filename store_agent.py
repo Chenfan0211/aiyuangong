@@ -62,6 +62,19 @@ class IntentRule:
 
 
 INTENT_RULES: tuple[IntentRule, ...] = (
+    IntentRule("store_diagnosis", (
+        "为什么订单", "为什么曝光", "为什么访问", "为什么下降", "为什么上涨", "为什么掉",
+        "下降原因", "上涨原因", "原因分析", "经营诊断", "归因",
+    ), "经营变化归因"),
+    IntentRule("task_help", (
+        "任务详情", "这个任务", "这些任务具体", "任务具体", "任务目标", "任务要求",
+        "需要提交什么证据", "提交什么证据", "任务完成需要什么证据", "怎么完成这个任务", "这个任务怎么做",
+    ), "任务具体信息与执行方案"),
+    IntentRule("period_comparison", (
+        "对比昨天", "和昨天比", "比昨天", "对比前天", "前几天", "周期对比", "环比",
+        "和前7天", "较前", "变化趋势",
+    ), "周期对比"),
+
     IntentRule("daily_report", ("日报", "经营报告", "今日报告", "今天总结"), "生成店长日报"),
     IntentRule("data_gap", ("哪天缺数", "缺哪几天", "哪天没数据", "哪些天没数据", "缺数日期"), "缺日明细"),
     IntentRule("data_quality", ("数据齐不齐", "数据质量", "数据全不全", "缺不缺数", "数据完不完整"), "数据质量体检"),
@@ -70,6 +83,10 @@ INTENT_RULES: tuple[IntentRule, ...] = (
     IntentRule("execution_help", ("怎么做", "流程", "步骤", "证据", "完成了", "做完了"), "执行 SOP"),
     IntentRule("reputation_help", ("差评", "评价", "口碑"), "评价与差评处理"),
     IntentRule("package_help", ("套餐", "转化", "团购"), "套餐诊断"),
+    IntentRule("advice", (
+        "建议", "方案", "优化", "提升", "改善", "怎么办", "怎么处理", "下一步",
+        "行动计划", "如何提升", "怎么提高", "如何提高",
+    ), "经营行动建议"),
     IntentRule("platform_metrics", (
         "最近数据", "经营数据", "平台数据", "数据分析", "美团", "抖音",
         "曝光", "详情访问", "访问量", "订单", "核销", "gmv", "GMV", "流量", "转化率", "数据",
@@ -94,6 +111,53 @@ METRIC_SLOTS = (
     ("gmv", ("gmv", "GMV", "营业额", "销售额", "流水")),
     ("refunds", ("退款",)),
     ("review_count", ("评价数", "评价", "评分")),
+)
+
+TASK_CATEGORY_LABELS = {
+    "reputation": "口碑与评价",
+    "package": "套餐与转化",
+    "traffic": "流量与曝光",
+    "fulfillment": "履约与核销",
+    "review": "评价处理",
+}
+TASK_TARGET_LABELS = {
+    "metric": "指标",
+    "operator": "条件",
+    "threshold": "阈值",
+    "value": "目标值",
+    "window": "窗口",
+    "platform": "平台",
+    "package_id": "套餐",
+    "category": "类别",
+    "name": "名称",
+    "target": "目标",
+}
+TASK_CATEGORY_STEPS = {
+    "reputation": (
+        "先核对订单、评价原文和履约事实，确认问题属于服务、履约还是顾客预期差异",
+        "形成不诱导好评的回复或补救草稿；涉及赔付、公开回复时提交审批",
+        "上传脱敏订单号、沟通记录或截图，完成后等待负责人验收",
+    ),
+    "package": (
+        "确认套餐样本量、价格和漏斗掉点，先判断是曝光、访问还是支付环节问题",
+        "只做一个变量实验，明确上线时间、观察窗口和停止条件",
+        "价格、库存、门店范围和上架动作必须走审批，记录实验前后指标",
+    ),
+    "traffic": (
+        "核对活动、投放、平台曝光入口和内容发布时间是否发生变化",
+        "检查标题、主图、团购锚点和营业状态是否影响曝光",
+        "记录调整前后曝光量、访问量和活动状态，按窗口复盘",
+    ),
+    "fulfillment": (
+        "核查预约排期、库存、核销提醒和到店体验问题",
+        "逐单区分正常延期、顾客取消和履约异常",
+        "上传脱敏处理记录，并跟踪核销率和退款变化",
+    ),
+}
+DEFAULT_TASK_STEPS = (
+    "确认任务目标、截止时间和负责人，不自行扩大执行范围",
+    "按门店 SOP 执行，并保留可核验的脱敏记录",
+    "提交任务要求的证据，等待负责人验收",
 )
 
 
@@ -321,12 +385,229 @@ class StoreOperationsAgent:
             return "目前没有分配给你的待办。你仍可询问标准操作流程或向店长反馈现场问题。"
         lines = []
         for index, task in enumerate(tasks, 1):
-            approval = "，需审批后执行" if task["requires_approval"] else ""
-            status = f"，当前状态 {task['status']}" if task.get("status") else ""
+            approval = "，需审批后执行" if task.get("requires_approval") or task.get("approval_required") else ""
+            status = f"，当前状态 {task.get('status')}" if task.get("status") else ""
+            due = str(task.get("due_at") or "")
+            due_text = due[11:16] if len(due) >= 16 else (due or "未设置")
+            reason = str(task.get("reason") or "未提供").strip()
+            evidence = StoreOperationsAgent._evidence_text(task)
             lines.append(
-                f"{index}. {task['title']}（{task['priority']}，截止 {task['due_at'][11:16]}{approval}{status}）"
+                f"{index}. {task.get('title')}（{task.get('priority')}，截止 {due_text}{approval}{status}）\n"
+                f"   依据：{reason}\n   证据：{evidence}"
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _target_text(task: dict[str, Any]) -> str:
+        target = task.get("target") or {}
+        if isinstance(target, dict):
+            parts = []
+            for key, value in target.items():
+                if value is None or value == "":
+                    continue
+                label = TASK_TARGET_LABELS.get(str(key), str(key))
+                if isinstance(value, (dict, list)):
+                    rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                else:
+                    rendered = str(value)
+                parts.append(f"{label}：{rendered}")
+            return "；".join(parts) or "未配置"
+        if isinstance(target, list):
+            return "；".join(str(item) for item in target) or "未配置"
+        return str(target) if target else "未配置"
+
+    @staticmethod
+    def _evidence_text(task: dict[str, Any]) -> str:
+        evidence = task.get("evidence_required") or []
+        if isinstance(evidence, str):
+            evidence = [evidence]
+        return "、".join(str(item) for item in evidence if str(item).strip()) or "无额外证据要求"
+
+    @classmethod
+    def _task_step_lines(cls, task: dict[str, Any]) -> list[str]:
+        category = str(task.get("category") or "")
+        return list(TASK_CATEGORY_STEPS.get(category, DEFAULT_TASK_STEPS))
+
+    @classmethod
+    def _task_detail_text(cls, task: dict[str, Any], include_track: bool = False) -> str:
+        title = str(task.get("title") or "未命名任务")
+        task_id = str(task.get("task_id") or "-")
+        category = TASK_CATEGORY_LABELS.get(str(task.get("category") or ""), str(task.get("category") or "未分类"))
+        assignee = str(task.get("assignee") or task.get("assignee_id") or "未指定")
+        approval = bool(task.get("requires_approval") or task.get("approval_required"))
+        lines = [
+            f"任务：{title}（{task_id}）",
+            f"分类：{category}｜优先级：{task.get('priority') or '-'}｜状态：{task.get('status') or '-'}｜负责人：{assignee}",
+            f"截止时间：{task.get('due_at') or '未设置'}",
+            f"生成依据：{task.get('reason') or '未提供'}",
+            f"目标：{cls._target_text(task)}",
+            f"需要提交的证据：{cls._evidence_text(task)}",
+            f"审批要求：{'需要审批' if approval else '无需审批'}",
+            "执行建议：",
+        ]
+        lines.extend(f"- {step}" for step in cls._task_step_lines(task))
+        lines.append("完成条件：已按要求执行，并提交规定证据后，由负责人验收。")
+        if include_track:
+            evidence = task.get("evidence") or []
+            events = task.get("events") or []
+            if evidence:
+                lines.append("已提交证据：")
+                for item in evidence[-5:]:
+                    label = item.get("evidence_type") or "证据"
+                    ref = item.get("object_ref") or "-"
+                    lines.append(f"- {label}：{ref}")
+            if events:
+                lines.append("最近事件：")
+                for item in events[-5:]:
+                    lines.append(f"- {item.get('from_status') or '创建'} → {item.get('to_status') or '-'}（{item.get('actor_id') or '系统'}）")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _match_task(text: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        matched = []
+        for task in tasks:
+            if str(task.get("task_id") or "") in text or str(task.get("title") or "") in text:
+                matched.append(task)
+        return matched
+
+    @classmethod
+    def _task_advice(cls, task: dict[str, Any]) -> dict[str, Any]:
+        steps = cls._task_step_lines(task)
+        return {
+            "headline": f"任务《{task.get('title') or '未命名任务'}》执行方案",
+            "actions": [
+                {"priority": index, "title": step, "detail": "按任务目标执行，不扩大范围",
+                 "owner_role": str(task.get("assignee") or task.get("assignee_id") or "负责人"),
+                 "evidence": cls._evidence_text(task),
+                 "metric": cls._target_text(task),
+                 "approval_required": bool(task.get("requires_approval") or task.get("approval_required"))}
+                for index, step in enumerate(steps, 1)
+            ],
+            "watch": ["任务状态", "提交证据", "截止时间"],
+            "confidence": "high",
+            "missing_data": [] if (task.get("evidence_required") or []) else ["任务证据要求未配置"],
+        }
+
+    @staticmethod
+    def _advice_metric_label(cause: dict[str, Any]) -> str:
+        for evidence in cause.get("evidence") or []:
+            metric = evidence.get("metric") if isinstance(evidence, dict) else None
+            if metric:
+                return {
+                    "impressions": "曝光量", "detail_views": "详情访问", "paid_orders": "支付订单",
+                    "verified_orders": "核销订单", "view_rate": "访问转化率", "pay_rate": "支付转化率",
+                    "verify_rate": "核销率", "refunds": "退款单数", "refund_rate": "退款率",
+                    "negative_rate": "差评率", "avg_rating": "评分",
+                }.get(str(metric), str(metric))
+        return "核心经营指标"
+
+    @staticmethod
+    def _advice_owner_role(code: str) -> str:
+        return {
+            "data_quality": "店长/运营",
+            "traffic": "线上运营",
+            "visit_conversion": "线上运营",
+            "pay_conversion": "店长",
+            "fulfillment": "店长/店员",
+            "refund": "店长",
+            "reputation": "店长/店员",
+        }.get(code, "店长")
+
+    @staticmethod
+    def _advice_evidence(code: str) -> str:
+        return {
+            "data_quality": "补数记录、导出批次和日期覆盖截图",
+            "traffic": "活动/投放状态记录、曝光入口截图",
+            "visit_conversion": "主图、标题、价格带调整前后记录",
+            "pay_conversion": "套餐价格/库存变更记录和下单链路截图",
+            "fulfillment": "预约、核销和退款处理记录",
+            "refund": "退款原因分类表",
+            "reputation": "差评回复、回访和整改任务记录",
+        }.get(code, "执行记录和调整前后指标")
+
+    def _advice_from_diagnosis(self, diagnosis: dict[str, Any], comparison: dict[str, Any]) -> dict[str, Any]:
+        causes = diagnosis.get("causes") or []
+        actions: list[dict[str, Any]] = []
+        missing_data: list[str] = []
+        for cause in causes:
+            code = str(cause.get("code") or "")
+            if code in {"insufficient_evidence", "data_quality"}:
+                missing_data.append(str(cause.get("label") or "需要补齐数据"))
+            for action in cause.get("actions") or []:
+                if len(actions) >= 3:
+                    break
+                text = str(action)
+                actions.append({
+                    "priority": len(actions) + 1,
+                    "title": text,
+                    "detail": str(cause.get("label") or ""),
+                    "owner_role": self._advice_owner_role(code),
+                    "evidence": self._advice_evidence(code),
+                    "metric": self._advice_metric_label(cause),
+                    "approval_required": any(term in text for term in HIGH_RISK_TERMS),
+                })
+            if len(actions) >= 3:
+                break
+        if missing_data and not actions:
+            actions = [{"priority": 1, "title": "先补齐缺失日期的平台报表并重新导入",
+                        "detail": "数据不完整时不能做确定经营归因", "owner_role": "店长/运营",
+                        "evidence": "补数记录和导出批次", "metric": "数据覆盖率",
+                        "approval_required": False}]
+        if not actions:
+            actions = [{"priority": 1, "title": "保持当前经营动作，继续观察下一周期",
+                        "detail": "当前数据未发现明显异常", "owner_role": "店长",
+                        "evidence": "本周期经营记录", "metric": "核心经营指标",
+                        "approval_required": False}]
+        confidence = "low" if missing_data else "medium"
+        for cause in causes:
+            if cause.get("confidence") == "high":
+                confidence = "high"
+                break
+        watch = []
+        for action in actions:
+            if action["metric"] not in watch:
+                watch.append(action["metric"])
+        return {
+            "headline": str(causes[0].get("label")) if causes else "当前数据未发现明显异常",
+            "actions": actions,
+            "watch": watch or ["曝光量", "详情访问", "支付订单", "核销率"],
+            "confidence": confidence,
+            "missing_data": missing_data,
+        }
+
+    @staticmethod
+    def _render_advice(advice: dict[str, Any]) -> str:
+        lines = [f"结论：{advice.get('headline') or '先确认数据，再决定动作'}", "优先动作："]
+        for action in advice.get("actions") or []:
+            lines.append(
+                f"{action.get('priority')}. {action.get('title')}\n"
+                f"   责任角色：{action.get('owner_role')}｜证据/输出：{action.get('evidence')}｜"
+                f"观察指标：{action.get('metric')}｜需审批：{'是' if action.get('approval_required') else '否'}"
+            )
+        if advice.get("missing_data"):
+            lines.append("缺失数据：" + "；".join(advice["missing_data"]))
+        lines.append("观察指标：" + "、".join(advice.get("watch") or []))
+        lines.append("风险提示：建议基于已导入数据，不替代门店现场核实；涉及改价、赔付、发布或上架必须先审批。")
+        return "\n".join(lines)
+
+    def _answer_task_help(self, user: dict[str, Any], text: str) -> tuple[str, list[Any], Optional[dict[str, Any]]]:
+        visible = self.visible_tasks(user["user_id"], user)
+        if not visible:
+            return "当前没有分配给你的任务，因此没有可展开的任务详情。", self._default_sources(), None
+        matched = self._match_task(text, visible)
+        selected = matched[:3] if matched else visible[:3]
+        if matched and len(matched) == 1 and self.tools is not None:
+            detail = self.tools.task_detail(matched[0]["task_id"], user)
+            view = self._task_view(detail)
+            view["events"] = detail.get("events") or []
+            view["evidence"] = detail.get("evidence") or []
+            selected = [view]
+        blocks = [self._task_detail_text(task, include_track=bool(matched and len(matched) == 1))
+                  for task in selected]
+        suffix = ""
+        if len(visible) > len(selected):
+            suffix = f"\n\n还有 {len(visible) - len(selected)} 项任务未展开，请继续指定任务名称。"
+        return "任务具体信息如下：\n\n" + "\n\n".join(blocks) + suffix, self._default_sources(), self._task_advice(selected[0])
 
     @staticmethod
     def _metric_value(value: Any, suffix: str = "") -> str:
@@ -616,6 +897,175 @@ class StoreOperationsAgent:
             answer = "当前没有分配给你的任务，因此没有可解释的任务依据。"
         return answer, self._default_sources()
 
+    COMPARISON_METRICS = (
+        ("impressions", "曝光量"), ("detail_views", "详情访问"), ("paid_orders", "支付订单"),
+        ("verified_orders", "核销订单"), ("gmv", "成交金额"), ("refunds", "退款单数"),
+    )
+    COMPARISON_RATES = (
+        ("view_rate", "访问率"), ("pay_rate", "支付转化率"), ("verify_rate", "核销率"),
+        ("negative_rate", "差评率"), ("refund_rate", "退款率"),
+    )
+    CAUSE_CONFIDENCE = {"high": "高", "medium": "中", "low": "低"}
+
+    @staticmethod
+    def _fmt_change(value: Any) -> str:
+        if value is None:
+            return "变化不可比"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return f"{number:+.1f}%"
+
+    @staticmethod
+    def _fmt_abs(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        return f"{value:,}"
+
+    def _render_comparison(self, result: dict[str, Any]) -> str:
+        lines = ["周期对比结果（默认按每平台最新完整数据日）"]
+        for key in ("day", "week"):
+            window = (result.get("windows") or {}).get(key)
+            if not window:
+                continue
+            current, previous = window.get("current"), window.get("previous")
+            if current and previous:
+                lines.append(f"\n【{window.get('label') or key}】{current['start']} ~ {current['end']} "
+                             f"对比 {previous['start']} ~ {previous['end']}")
+            metrics, previous_metrics = window.get("metrics"), window.get("previous_metrics")
+            if metrics and previous_metrics:
+                for metric, label in self.COMPARISON_METRICS:
+                    if metric not in metrics or metric not in previous_metrics:
+                        continue
+                    absolute = (window.get("absolute_change") or {}).get(metric)
+                    suffix = f"，变化 {self._fmt_abs(absolute)}" if absolute is not None else ""
+                    lines.append(f"- {label}：{self._fmt_abs(metrics[metric])} vs "
+                                 f"{self._fmt_abs(previous_metrics[metric])}"
+                                 f"（{self._fmt_change((window.get('change_percent') or {}).get(metric))}{suffix}）")
+                for metric, label in self.COMPARISON_RATES:
+                    if metric not in metrics or metric not in previous_metrics:
+                        continue
+                    absolute = (window.get("absolute_change") or {}).get(metric)
+                    suffix = f"，变化 {self._fmt_abs(absolute)} 个百分点" if absolute is not None else ""
+                    lines.append(f"- {label}：{self._fmt_abs(metrics[metric])}% vs "
+                                 f"{self._fmt_abs(previous_metrics[metric])}%{suffix}")
+            else:
+                lines.append("- 门店汇总缺少两个窗口都覆盖完整的平台数据，不能给出确定升降结论。")
+            platforms = window.get("platforms") or {}
+            for item in platforms.values():
+                if item.get("metrics") and item.get("previous_metrics"):
+                    changes = item.get("change_percent") or {}
+                    lines.append(
+                        f"- {item.get('label')}：曝光 {self._fmt_abs(item['metrics'].get('impressions'))} "
+                        f"({self._fmt_change(changes.get('impressions'))})，支付 "
+                        f"{self._fmt_abs(item['metrics'].get('paid_orders'))} "
+                        f"({self._fmt_change(changes.get('paid_orders'))})"
+                    )
+                else:
+                    reason = "；".join(str(entry.get("label", entry.get("code", ""))) for entry in item.get("blocked") or [])
+                    lines.append(f"- {item.get('label')}：{reason or '没有可对比数据'}")
+            blocked = window.get("blocked") or []
+            if blocked:
+                lines.append("数据完整性提示：" + "；".join(
+                    str(item.get("label", item.get("code", ""))) for item in blocked
+                ))
+        lines.append("\n依据：以上数字来自已导入的平台指标库和实际对比日期，不包含演示数字。")
+        return "\n".join(lines)
+
+    def _render_diagnosis(self, diagnosis: dict[str, Any]) -> str:
+        lines = ["周期对比与经营归因（以下为可能原因，不是确定因果）"]
+        causes = diagnosis.get("causes") or []
+        for cause in causes:
+            confidence = self.CAUSE_CONFIDENCE.get(str(cause.get("confidence")), str(cause.get("confidence") or ""))
+            lines.append(f"\n- {cause.get('label')}（置信度：{confidence or '低'}）")
+            for evidence in cause.get("evidence") or []:
+                if not isinstance(evidence, dict):
+                    lines.append(f"  证据：{evidence}")
+                    continue
+                metric = evidence.get("metric")
+                if metric:
+                    label = self._advice_metric_label({"evidence": [evidence]})
+                    pieces = []
+                    if evidence.get("current") is not None or evidence.get("previous") is not None:
+                        pieces.append(f"本期 {self._fmt_abs(evidence.get('current'))}，上期 {self._fmt_abs(evidence.get('previous'))}")
+                    if evidence.get("change_percent") is not None:
+                        pieces.append(f"变化 {self._fmt_change(evidence.get('change_percent'))}")
+                    if evidence.get("absolute_change") is not None:
+                        pieces.append(f"绝对变化 {self._fmt_abs(evidence.get('absolute_change'))}")
+                    lines.append(f"  证据：{label}，" + "；".join(pieces))
+                elif evidence.get("type") == "calendar":
+                    lines.append(f"  证据：本期周末 {evidence.get('current_weekend_days')} 天，上期周末 {evidence.get('previous_weekend_days')} 天")
+                elif evidence.get("type") == "blocked":
+                    lines.append(f"  证据：{evidence.get('platform_label') or evidence.get('platform') or '平台'} {evidence.get('detail') or evidence.get('reason') or '数据被阻断'}")
+                elif evidence.get("type") == "missing":
+                    lines.append("  证据：对比窗口存在缺失数据，当前无法形成完整结论")
+                elif evidence.get("detail"):
+                    lines.append(f"  证据：{evidence.get('detail')}")
+            actions = cause.get("actions") or []
+            if actions:
+                lines.append("  建议：" + "；".join(str(action) for action in actions))
+        blocked = diagnosis.get("blocked") or []
+        if blocked:
+            lines.append("\n数据质量阻断：存在缺口，确定原因不成立，请先补齐数据。")
+        for caveat in diagnosis.get("caveats") or []:
+            lines.append(f"注意：{caveat}")
+        lines.append(f"\n依据：{diagnosis.get('disclaimer')}")
+        return "\n".join(lines)
+
+    def _answer_period_comparison(self, user: dict[str, Any], slots: dict[str, Any]) -> tuple[str, list[Any]]:
+        if self.tools is None:
+            return ("周期对比需要在生产数据模式下运行；当前演示快照不能给出真实对比。",
+                    self._default_sources())
+        try:
+            result = self.tools.period_comparison(
+                user, anchor="auto", windows=("day", "week"),
+                platform=slots.get("platform"), metric=slots.get("metric"),
+            )
+        except PermissionDenied as exc:
+            return (f"{user['name']}，你没有查看经营指标的权限。", [{"type": "policy", "label": str(exc)}])
+        return self._render_comparison(result), list(result.get("sources") or [])
+
+    def _answer_advice(self, user: dict[str, Any], slots: dict[str, Any]) -> tuple[str, list[Any], Optional[dict[str, Any]]]:
+        if self.tools is None:
+            advice = {
+                "headline": "当前是演示快照模式，不能生成真实经营建议",
+                "actions": [{"priority": 1, "title": "先补齐平台数据或切换到生产数据模式",
+                             "detail": "没有真实指标时不能判断曝光、转化或履约问题", "owner_role": "店长/运营",
+                             "evidence": "平台导出文件和导入记录", "metric": "数据覆盖率", "approval_required": False}],
+                "watch": ["数据覆盖率", "曝光量", "支付订单"], "confidence": "low",
+                "missing_data": ["真实平台指标数据"],
+            }
+            return self._render_advice(advice), self._default_sources(), advice
+        try:
+            comparison = self.tools.period_comparison(
+                user, anchor="auto", windows=("day", "week"),
+                platform=slots.get("platform"), metric=slots.get("metric"),
+            )
+            diagnosis = self.tools.diagnose_store_change(user, comparison=comparison)
+        except PermissionDenied as exc:
+            return f"{user['name']}，你没有查看经营指标的权限。", [{"type": "policy", "label": str(exc)}], None
+        advice = self._advice_from_diagnosis(diagnosis, comparison)
+        sources = list(diagnosis.get("sources") or []) + self._default_sources()
+        return self._render_advice(advice), sources, advice
+
+    def _answer_store_diagnosis(self, user: dict[str, Any], slots: dict[str, Any]) -> tuple[str, list[Any], Optional[dict[str, Any]]]:
+        if self.tools is None:
+            return ("经营归因需要在生产数据模式下运行；当前演示快照不能给出真实原因。",
+                    self._default_sources(), None)
+        try:
+            comparison = self.tools.period_comparison(
+                user, anchor="auto", windows=("day", "week"), platform=slots.get("platform"),
+            )
+            diagnosis = self.tools.diagnose_store_change(user, comparison=comparison)
+        except PermissionDenied as exc:
+            return (f"{user['name']}，你没有查看经营指标的权限。", [{"type": "policy", "label": str(exc)}], None)
+        advice = self._advice_from_diagnosis(diagnosis, comparison)
+        answer = self._render_diagnosis(diagnosis) + "\n\n" + self._render_advice(advice)
+        return answer, list(diagnosis.get("sources") or []), advice
+
     # ---------------- 主入口 ----------------
 
     def reply(
@@ -635,6 +1085,7 @@ class StoreOperationsAgent:
         slots = self.parse_slots(text)
         sources = self._default_sources()
         requires_approval = False
+        advice: Optional[dict[str, Any]] = None
 
         if not self._can(user, "metrics:read:financial") and any(term in text for term in SENSITIVE_TERMS):
             intent = "permission_denied"
@@ -654,8 +1105,16 @@ class StoreOperationsAgent:
         else:
             intent = self.match_intent(text) or ""
             days = int(slots["days"])
-            if intent == "platform_metrics":
+            if intent == "task_help":
+                answer, sources, advice = self._answer_task_help(user, text)
+            elif intent == "advice":
+                answer, sources, advice = self._answer_advice(user, slots)
+            elif intent == "platform_metrics":
                 answer, sources = self._answer_platform_metrics(user, slots)
+            elif intent == "period_comparison":
+                answer, sources = self._answer_period_comparison(user, slots)
+            elif intent == "store_diagnosis":
+                answer, sources, advice = self._answer_store_diagnosis(user, slots)
             elif intent == "daily_report":
                 answer, sources = self._answer_daily_report(user)
             elif intent == "data_quality":
@@ -712,6 +1171,7 @@ class StoreOperationsAgent:
             "store": self.snapshot["store"],
             "sources": sources,
             "requires_approval": requires_approval,
+            "advice": advice,
             "visible_task_ids": visible_ids,
             "slots": slots,
             "mode": "tools" if self.tools is not None else "local_demo",

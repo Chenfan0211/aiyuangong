@@ -27,6 +27,7 @@ from typing import Any, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from agent_tools import PermissionDenied, StoreTools
@@ -34,12 +35,15 @@ from approval_callbacks import ApprovalCallbackError, create_approval_callback_a
 from evidence_store import EvidenceError, EvidenceNotFoundError, EvidenceStore
 from outcome_tracker import OutcomeTracker, OutcomeTrackerError
 from ops_store import OpsStore, OpsStoreError
-from auth import AuthError, AuthStore, AccountLocked, CredentialsError, ROLES, SessionInvalid, SecurityContext
+from auth import AuthError, AuthStore, AccountLocked, CredentialsError, ROLES, SessionInvalid, SecurityContext, permissions_for
+from channel_store import ChannelBindingError, ChannelBindingStore
 from governance import ApprovalStore, AuditCenter, ToolRunLog, apply_decision, log_tool_call
 from platform_data import PlatformMetricStore
 from llm_agent import OpenAIToolResponder, ToolCallingAgent
 from reporting import StoreReporter
 from registry import RegistryError, RegistryStore
+from runtime_pages import render_demo_agent_page
+from security import ReplayGuard, check_integration_config, verify_inbound
 from snapshot_builder import SnapshotError, load_config, save_config
 from store_agent import AgentSessionStore, OpenAICompatibleResponder, StoreOperationsAgent
 from task_store import TaskStore, TaskStoreError
@@ -49,6 +53,17 @@ ACCESS_LOGGER = logging.getLogger("store_ops.access")
 WRITE_STATUSES = ("accepted", "done", "verified", "rejected", "canceled", "ready")
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+FULL_CAPABILITIES = {
+    "full": True,
+    "mfa": True,
+    "admin": True,
+    "callbacks": True,
+    "evidence_upload": True,
+    "outcomes": True,
+    "inbound_messages": True,
+    "channel_bindings": True,
+}
 
 
 
@@ -102,6 +117,11 @@ def validate_startup(host: str, auth_mode: str) -> None:
 
 def _is_production() -> bool:
     return os.getenv("STORE_AGENT_ENV", "development").strip().lower() in {"production", "prod"}
+
+
+def default_evidence_dir() -> Path:
+    configured = os.getenv("STORE_AGENT_EVIDENCE_DIR") or os.getenv("EVIDENCE_ROOT_DIR")
+    return Path(configured).expanduser() if configured else ROOT / "evidence"
 
 
 
@@ -179,6 +199,29 @@ class StatusRequest(BaseModel):
     reason: str = ""
 
 
+class ChannelBindingCreate(BaseModel):
+    provider: str = Field(..., min_length=2, max_length=32)
+    external_user_id: str = Field(..., min_length=1, max_length=128)
+    user_id: str = Field(..., min_length=1, max_length=64)
+    display_name: str = ""
+    mobile: str = ""
+
+
+class ChannelBindingPatch(BaseModel):
+    display_name: Optional[str] = None
+    mobile: Optional[str] = None
+    status: Optional[str] = Field(default=None, description="active 或 disabled")
+
+
+class InboundMessageRequest(BaseModel):
+    external_user_id: str = Field(..., min_length=1, max_length=128)
+    text: str = Field(..., min_length=1, max_length=4000)
+    display_name: str = ""
+    mobile: str = ""
+    session_id: str = Field(default="", max_length=80)
+    timestamp: Optional[int] = None
+    nonce: str = ""
+
 class AppContext:
     """一次进程内共享的依赖容器。"""
 
@@ -196,6 +239,8 @@ class AppContext:
         self.evidence = EvidenceStore(store_db, root_dir=evidence_dir, tenant_id=tenant_id)
         self.outcomes = OutcomeTracker(store_db, tenant_id=tenant_id)
         self.auth = AuthStore(store_db, tenant_id=tenant_id)
+        self.channel_bindings = ChannelBindingStore(store_db, tenant_id=tenant_id)
+        self.replay_guard = ReplayGuard(store_db, tenant_id=tenant_id)
         self.tools = StoreTools(self.config, self.metric_store, self.task_store, config_path=self.config_path)
         self.ops = OpsStore(store_db, tenant_id=tenant_id, store_id=self.store_id)
         self.sessions = AgentSessionStore(chat_db, tenant_id=tenant_id)
@@ -224,9 +269,13 @@ def create_app(
     store_db: Path = ROOT / "data" / "store_ops.db",
     chat_db: Path = ROOT / "data" / "agent_demo.db",
     auth_mode: str = "session",
-    evidence_dir: Path = ROOT / "evidence",
+    evidence_dir: Optional[Path] = None,
 ) -> FastAPI:
+    evidence_dir = Path(evidence_dir) if evidence_dir is not None else default_evidence_dir()
     ctx = AppContext(config_path, metrics_db, store_db, chat_db, auth_mode, evidence_dir)
+    integration = check_integration_config()
+    if not integration["ok"]:
+        raise RuntimeError("生产集成配置未闭合：" + "；".join(integration["problems"]))
     production = _is_production()
     app = FastAPI(
         title="门店运营 Agent API",
@@ -251,7 +300,7 @@ def create_app(
         unsafe = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
         path = request.url.path
         csrf_exempt = (path in {"/api/auth/login", "/api/auth/mfa/verify"}
-                       or path.startswith("/api/webhooks/"))
+                       or path.startswith("/api/webhooks/") or path.startswith("/api/inbound/messages/"))
         bearer = request.headers.get("authorization", "").lower().startswith("bearer ")
         if (unsafe and path.startswith("/api/") and not csrf_exempt and not bearer
                 and request.cookies.get("store_ops_session")):
@@ -509,6 +558,120 @@ def create_app(
                               after={"decision": result.get("decision"), "duplicate": result.get("duplicate")})
         return {"result": result}
 
+    @app.post("/api/inbound/messages/{provider}", tags=["对话"], summary="签名入站消息（绑定后进入 Agent）")
+    async def inbound_message(provider: str, payload: InboundMessageRequest,
+                              request: Request) -> dict[str, Any]:
+        normalized = str(provider or "").strip().lower()
+        if not normalized or len(normalized) > 32:
+            raise HTTPException(status_code=404, detail="不支持的入站消息提供方")
+        secret = (os.getenv("STORE_AGENT_INBOUND_SIGNING_SECRET") or "").strip()
+        if not secret:
+            raise HTTPException(status_code=503, detail="入站消息签名密钥尚未配置")
+        raw = await request.body()
+        signature = (request.headers.get("x-store-signature")
+                     or request.headers.get("x-inbound-signature") or "")
+        timestamp = request.headers.get("x-store-timestamp") or payload.timestamp
+        nonce = request.headers.get("x-store-nonce") or payload.nonce
+        verification = verify_inbound(secret, raw, signature, timestamp, nonce,
+                                      ctx.replay_guard, source=f"inbound:{normalized}")
+        tenant_id = str(ctx.config.get("tenant_id") or "")
+        if not verification.get("ok"):
+            ctx.auth.record_audit(
+                event_type="inbound_message_rejected", actor_type="external", actor_id=normalized,
+                tenant_id=tenant_id, store_id=ctx.store_id, object_type="inbound_message",
+                object_id=payload.external_user_id,
+                after={"reason": verification.get("reason"), "nonce": nonce},
+            )
+            raise HTTPException(status_code=401, detail="入站消息验签失败")
+        binding = ctx.channel_bindings.resolve(
+            tenant_id, ctx.store_id, normalized, payload.external_user_id,
+            mobile=payload.mobile or None,
+        )
+        if binding is None:
+            ctx.auth.record_audit(
+                event_type="inbound_message_unbound", actor_type="external", actor_id=normalized,
+                tenant_id=tenant_id, store_id=ctx.store_id, object_type="inbound_message",
+                object_id=payload.external_user_id,
+                after={"reason": "binding_missing_or_disabled"},
+            )
+            return {"accepted": True, "bound": False, "provider": normalized,
+                    "reply": "该聊天账号尚未绑定门店成员，请联系店主在“设置与成员”中完成绑定。"}
+        role = str(binding.get("role") or "")
+        session_id = payload.session_id or f"{normalized}:{payload.external_user_id}"
+        context = SecurityContext(
+            user_id=str(binding.get("user_id") or ""), tenant_id=tenant_id, store_id=ctx.store_id,
+            role=role, display_name=str(binding.get("display_name") or binding.get("user_display_name") or "门店成员"),
+            session_id=session_id, permissions=permissions_for(role),
+        )
+        result = await run_in_threadpool(chat, ChatRequest(session_id=session_id, message=payload.text), context)
+        ctx.auth.record_audit(
+            event_type="inbound_message_handled", actor_type="external", actor_id=normalized,
+            tenant_id=tenant_id, store_id=ctx.store_id, object_type="inbound_message",
+            object_id=payload.external_user_id,
+            after={"user_id": context.user_id, "intent": result.get("intent")},
+        )
+        return {"accepted": True, "bound": True, "provider": normalized, "user_id": context.user_id,
+                "role": role, "session_id": session_id, "reply": result["answer"],
+                "intent": result["intent"], "sources": result.get("sources") or []}
+
+    def _scoped_channel_binding(binding_id: str) -> Optional[dict[str, Any]]:
+        tenant_id = str(ctx.config.get("tenant_id") or "")
+        for item in ctx.channel_bindings.list(tenant_id, ctx.store_id):
+            if item["binding_id"] == binding_id:
+                return item
+        return None
+
+    @app.get("/api/admin/channel-bindings", tags=["管理"], summary="列出聊天账号绑定")
+    def channel_bindings_list(context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        tenant_id = str(ctx.config.get("tenant_id") or "")
+        return {"store_id": ctx.store_id, "bindings": ctx.channel_bindings.list(tenant_id, ctx.store_id)}
+
+    @app.post("/api/admin/channel-bindings", tags=["管理"], summary="创建聊天账号绑定")
+    def channel_binding_create(payload: ChannelBindingCreate,
+                               context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        tenant_id = str(ctx.config.get("tenant_id") or "")
+        members = {item["user_id"]: item for item in ctx.auth.list_users(tenant_id, ctx.store_id)}
+        member = members.get(payload.user_id)
+        if not member or member.get("status") != "active" or member.get("membership_status") != "active":
+            raise HTTPException(status_code=400, detail="只能绑定本门店的启用成员")
+        try:
+            binding = ctx.channel_bindings.create(
+                tenant_id=tenant_id, store_id=ctx.store_id, provider=payload.provider.strip().lower(),
+                external_user_id=payload.external_user_id, display_name=payload.display_name,
+                mobile=payload.mobile, user_id=payload.user_id, created_by=context.user_id,
+            )
+        except ChannelBindingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(
+            event_type="channel_binding_created", actor_type="user", actor_id=context.user_id,
+            tenant_id=tenant_id, store_id=ctx.store_id, object_type="channel_binding",
+            object_id=binding["binding_id"], after={"provider": binding["provider"],
+            "external_user_id": binding["external_user_id"], "user_id": binding["user_id"]},
+        )
+        return {"binding": binding}
+
+    @app.patch("/api/admin/channel-bindings/{binding_id}", tags=["管理"], summary="更新聊天账号绑定")
+    def channel_binding_update(binding_id: str, payload: ChannelBindingPatch,
+                               context: SecurityContext = Depends(require("store:manage"))) -> dict[str, Any]:
+        before = _scoped_channel_binding(binding_id)
+        if before is None:
+            raise HTTPException(status_code=404, detail="绑定不存在")
+        try:
+            binding = ctx.channel_bindings.update(
+                binding_id, display_name=payload.display_name, mobile=payload.mobile, status=payload.status,
+            )
+        except ChannelBindingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(
+            event_type="channel_binding_updated", actor_type="user", actor_id=context.user_id,
+            tenant_id=str(ctx.config.get("tenant_id") or ""), store_id=ctx.store_id,
+            object_type="channel_binding", object_id=binding_id, before=before, after=binding,
+        )
+        return {"binding": binding}
     # ---------------- 管理后台 ----------------
 
     @app.get("/api/admin/config", tags=["管理"], summary="读取门店配置")
@@ -659,6 +822,7 @@ def create_app(
             "llm_mode": ("tool_calling" if ctx.agent.tool_agent is not None
                          else ("plain" if ctx.agent.llm_responder is not None else "off")),
             "data_status": ctx.tools.data_status() if context.has("metrics:read") else None,
+            "capabilities": dict(FULL_CAPABILITIES),
             "permissions": sorted(context.permissions),
         }
 
@@ -683,6 +847,26 @@ def create_app(
                              "anomaly_count": quality["summary"]["anomaly_count"]})
         return quality
 
+    @app.get("/api/analysis/compare", tags=["数据"], summary="日/周双口径周期对比")
+    def analysis_compare(anchor: str = Query("auto", description="auto / today / yesterday / YYYY-MM-DD"),
+                         window: str = Query("day,week", description="day,week"),
+                         platform: Optional[str] = Query(None, description="meituan / douyin"),
+                         metric: Optional[str] = Query(None, description="可选指标键"),
+                         context: SecurityContext = Depends(require("metrics:read"))) -> dict[str, Any]:
+        windows = tuple(item.strip() for item in str(window).split(",") if item.strip())
+        try:
+            result = ctx.tools.analysis.compare(
+                anchor=anchor, windows=windows, platform=platform, metric=metric,
+                include_financial=context.has("metrics:read:financial"),
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        primary_window = (result.get("windows") or {}).get("day") or next(iter((result.get("windows") or {}).values()), {})
+        result["platforms"] = primary_window.get("platforms") or {}
+        _log("api:analysis_compare", context, input_payload={"anchor": anchor, "window": window,
+                                                             "platform": platform, "metric": metric},
+             output_payload={"blocked_count": len(result.get("blocked") or [])})
+        return result
     @app.get("/api/reports/daily", tags=["数据"], summary="店长日报")
     def daily_report(date: str = Query("today", description="today / yesterday / YYYY-MM-DD"),
                      context: SecurityContext = Depends(require("report:read"))) -> dict[str, Any]:
@@ -981,7 +1165,7 @@ def create_app(
     @app.get("/", include_in_schema=False)
     @app.get("/agent.html", include_in_schema=False)
     def page() -> HTMLResponse:
-        return HTMLResponse((ROOT / "agent.html").read_text(encoding="utf-8"))
+        return HTMLResponse(render_demo_agent_page(ROOT / "agent.html"))
 
     @app.get("/dashboard", include_in_schema=False)
     @app.get("/dashboard.html", include_in_schema=False)
@@ -1009,7 +1193,7 @@ def create_app(
     return app
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="启动门店运营 Agent（FastAPI）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
@@ -1021,7 +1205,13 @@ def main() -> None:
     parser.add_argument("--chat-db", default=os.getenv("STORE_AGENT_CHAT_DB", str(ROOT / "data" / "agent_demo.db")),
                         help="对话消息库：SQLite 路径或 postgresql:// DSN")
     parser.add_argument("--auth-mode", choices=("session", "demo"), default="session")
-    args = parser.parse_args()
+    parser.add_argument("--evidence-dir", type=Path, default=default_evidence_dir(),
+                        help="图片证据根目录；也可用 STORE_AGENT_EVIDENCE_DIR / EVIDENCE_ROOT_DIR")
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     validate_startup(args.host, args.auth_mode)
     logging.basicConfig(level=os.getenv("STORE_AGENT_LOG_LEVEL", "INFO"),
                         format="%(message)s")
@@ -1032,7 +1222,7 @@ def main() -> None:
         print("!! 警告：demo 认证模式允许 ?user_id= 伪身份，仅限本机演示。")
     print(f"门店运营 Agent（FastAPI）启动：http://{args.host}:{args.port}/ · 文档 /docs · auth={args.auth_mode}")
     uvicorn.run(
-        create_app(args.config, args.metrics_db, args.store_db, args.chat_db, args.auth_mode),
+        create_app(args.config, args.metrics_db, args.store_db, args.chat_db, args.auth_mode, args.evidence_dir),
         host=args.host, port=args.port,
     )
 

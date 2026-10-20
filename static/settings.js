@@ -3,6 +3,9 @@ const client = StoreSession.createClient();
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 let configRevision = null;
+const PROVIDER_LABELS = { mock: 'mock', wecom: '企业微信', feishu: '飞书' };
+const ROLE_LABELS = { employee: '店员', operator: '线上运营', manager: '店长', area_manager: '区域负责人', owner: '店主' };
+let memberCache = [];
 
 function notice(text, isError) {
   const el = $('notice');
@@ -15,7 +18,7 @@ async function api(path, options) {
   return client.json(path, options);
 }
 
-const RETENTION_KEYS = ['platform_metrics','package_metrics','metric_import_batches','reviews','action_tasks','task_evidence','task_events','approvals','audit_events','agent_messages','agent_sessions','agent_tool_runs','notifications','auth_sessions','login_attempts','webhook_nonces','users','memberships','stores','store_configs'];
+const RETENTION_KEYS = ['platform_metrics','package_metrics','metric_import_batches','reviews','action_tasks','task_evidence','task_events','approvals','audit_events','agent_messages','agent_sessions','agent_tool_runs','notifications','auth_sessions','login_attempts','webhook_nonces','users','memberships','channel_bindings','stores','store_configs'];
 function renderPackageCosts(items) {
   const box = $('packageCosts');
   box.innerHTML = '';
@@ -72,6 +75,8 @@ $('addPackageCost').onclick = () => {
 
 async function loadMembers() {
   const data = await api('/api/admin/members');
+  memberCache = data.members || [];
+  renderBindingMemberOptions(memberCache);
   const body = $('memberBody');
   body.innerHTML = '';
   if (!data.members.length) {
@@ -126,6 +131,114 @@ async function loadMembers() {
     body.appendChild(row);
   });
 }
+
+function providerLabel(provider) {
+  return PROVIDER_LABELS[provider] || provider || '';
+}
+
+function memberLabel(userId) {
+  const member = memberCache.find(item => item.user_id === userId);
+  if (!member) return userId || '';
+  return member.display_name || member.username || userId || '';
+}
+
+function renderBindingMemberOptions(members) {
+  const select = $('bindingUser');
+  const previous = select.value;
+  select.innerHTML = '';
+  const selectable = (members || []).filter(member =>
+    member.status === 'active' && (!member.membership_status || member.membership_status === 'active'));
+  if (!selectable.length) {
+    const empty = document.createElement('option');
+    empty.value = ''; empty.textContent = '暂无可绑定成员'; empty.disabled = true; empty.selected = true;
+    select.appendChild(empty);
+    return;
+  }
+  const placeholder = document.createElement('option');
+  placeholder.value = ''; placeholder.textContent = '请选择成员'; placeholder.disabled = true; placeholder.selected = true;
+  select.appendChild(placeholder);
+  selectable.forEach(member => {
+    const label = member.display_name || member.username || member.user_id;
+    const option = document.createElement('option');
+    option.value = member.user_id;
+    option.textContent = label + '（' + (ROLE_LABELS[member.role] || member.role || '') + '）';
+    select.appendChild(option);
+  });
+  if (previous && selectable.some(member => member.user_id === previous)) select.value = previous;
+}
+
+function bindingCell(text) {
+  const cell = document.createElement('td');
+  cell.textContent = text;
+  return cell;
+}
+
+function handleBindingError(error) {
+  if (!error || error.status === 401) return;
+  if (error.status === 403) { $('bindingSection').hidden = true; return; }
+  notice(error.message, true);
+}
+
+async function loadBindings() {
+  const data = await api('/api/admin/channel-bindings');
+  const body = $('bindingBody');
+  body.innerHTML = '';
+  const bindings = data.bindings || [];
+  if (!bindings.length) {
+    body.innerHTML = '<tr><td colspan="7">暂无绑定</td></tr>';
+    return;
+  }
+  bindings.forEach(binding => {
+    const row = document.createElement('tr');
+    row.appendChild(bindingCell(providerLabel(binding.provider)));
+    row.appendChild(bindingCell(binding.external_user_id || ''));
+    row.appendChild(bindingCell(memberLabel(binding.user_id)));
+    row.appendChild(bindingCell(binding.mobile_masked || '—'));
+    const statusCell = document.createElement('td');
+    const pill = document.createElement('span');
+    pill.className = 'status-pill ' + (binding.status || '');
+    pill.textContent = binding.status || '';
+    statusCell.appendChild(pill);
+    row.appendChild(statusCell);
+    row.appendChild(bindingCell(binding.created_at || '—'));
+    const actionCell = document.createElement('td');
+    const nextStatus = binding.status === 'active' ? 'disabled' : 'active';
+    const toggle = document.createElement('button');
+    toggle.className = 'ghost';
+    toggle.textContent = binding.status === 'active' ? '停用' : '启用';
+    toggle.onclick = async () => {
+      try {
+        await client.patchJson('/api/admin/channel-bindings/' + encodeURIComponent(binding.binding_id), { status: nextStatus });
+        notice('绑定已更新', false);
+        await loadBindings();
+      } catch (error) { handleBindingError(error); }
+    };
+    actionCell.appendChild(toggle);
+    row.appendChild(actionCell);
+    body.appendChild(row);
+  });
+}
+
+$('bindingForm').onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const externalUserId = $('bindingExternalId').value.trim();
+    const userId = $('bindingUser').value;
+    if (!externalUserId || !userId) { notice('请填写外部用户 ID 并选择门店成员', true); return; }
+    await client.postJson('/api/admin/channel-bindings', {
+      provider: $('bindingProvider').value,
+      external_user_id: externalUserId,
+      user_id: userId,
+      display_name: $('bindingName').value.trim(),
+      mobile: $('bindingMobile').value.trim()
+    });
+    notice('绑定已创建', false);
+    $('bindingForm').reset();
+    await loadBindings();
+  } catch (error) { handleBindingError(error); }
+};
+
+$('refreshBindings').onclick = () => loadBindings().catch(handleBindingError);
 
 $('configForm').onsubmit = async event => {
   event.preventDefault();
@@ -220,6 +333,8 @@ async function loadRetries() {
 }
 $('refreshOps').onclick = () => Promise.all([loadOpsRuns(), loadRetries()]).catch(error => { if (error.status !== 401) notice(error.message, true); });
 
-Promise.all([loadConfig(), loadMembers(), loadOpsRuns(), loadRetries()]).catch(error => {
+const membersReady = loadMembers();
+Promise.all([loadConfig(), membersReady, loadOpsRuns(), loadRetries()]).catch(error => {
   if (error.status !== 401) notice(error.message, true);
 });
+membersReady.then(loadBindings).catch(handleBindingError);

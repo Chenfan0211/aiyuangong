@@ -80,6 +80,7 @@ DEFAULT_RETENTION_DAYS: dict[str, int] = {
     "webhook_nonces": 1,
     "users": 0,                        # 主数据永久保留（人工管理）
     "memberships": 0,
+    "channel_bindings": 730,
     "stores": 0,
     "store_configs": 0,
 }

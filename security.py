@@ -18,12 +18,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from db import Database
 
@@ -328,15 +330,130 @@ def check_retention_policy(config_path: Path) -> dict[str, Any]:
             "forever_tables": sorted(table for table, days in policy.items() if days <= 0)}
 
 
+def _env_value(env: dict[str, str], key: str) -> str:
+    return str(env.get(key) or "").strip()
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    lowered = value.strip().lower()
+    return (
+        not lowered
+        or lowered.startswith(("replace-", "change-me", "changeme", "example-", "<"))
+        or "replace-with" in lowered
+        or "development-only" in lowered
+    )
+
+
+def check_integration_config(env: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    """校验显式选择的生产集成；mock/outbox/local 默认无需密钥。"""
+    values = dict(os.environ if env is None else env)
+    problems: list[str] = []
+
+    provider = (_env_value(values, "STORE_AGENT_APPROVAL_CALLBACK_PROVIDER") or "mock").lower()
+    if provider not in {"mock", "feishu", "wecom"}:
+        problems.append(f"不支持的 STORE_AGENT_APPROVAL_CALLBACK_PROVIDER：{provider}")
+    elif provider == "feishu":
+        if not _env_value(values, "FEISHU_VERIFICATION_TOKEN"):
+            problems.append("审批回调 provider=feishu 缺少 FEISHU_VERIFICATION_TOKEN")
+        if not _env_value(values, "FEISHU_ENCRYPT_KEY"):
+            problems.append("审批回调 provider=feishu 缺少 FEISHU_ENCRYPT_KEY")
+    elif provider == "wecom":
+        if not _env_value(values, "WECOM_CALLBACK_TOKEN"):
+            problems.append("审批回调 provider=wecom 缺少 WECOM_CALLBACK_TOKEN")
+        if not _env_value(values, "WECOM_ENCODING_AES_KEY"):
+            problems.append("审批回调 provider=wecom 缺少 WECOM_ENCODING_AES_KEY")
+        if not _env_value(values, "WECOM_CORP_ID"):
+            problems.append("审批回调 provider=wecom 缺少 WECOM_CORP_ID")
+
+    alert_channel = (_env_value(values, "STORE_AGENT_ALERT_CHANNEL") or "outbox").lower()
+    if alert_channel not in {"outbox", "feishu", "wecom"}:
+        problems.append(f"不支持的 STORE_AGENT_ALERT_CHANNEL：{alert_channel}")
+    elif alert_channel == "feishu":
+        if not (_env_value(values, "FEISHU_WEBHOOK_URL")
+                or _env_value(values, "STORE_AGENT_FEISHU_WEBHOOK_URL")):
+            problems.append("告警渠道 feishu 缺少 FEISHU_WEBHOOK_URL")
+    elif alert_channel == "wecom":
+        if not (_env_value(values, "WECOM_WEBHOOK_URL")
+                or _env_value(values, "STORE_AGENT_WECOM_WEBHOOK_URL")):
+            problems.append("告警渠道 wecom 缺少 WECOM_WEBHOOK_URL")
+
+    production = (_env_value(values, "STORE_AGENT_ENV") or "development").lower() in {"production", "prod"}
+    mfa_enforced = (_env_value(values, "STORE_AGENT_MFA_ENFORCE") or "").lower() in {"1", "true", "yes", "on"}
+    if production and mfa_enforced:
+        mfa_key = _env_value(values, "STORE_AGENT_MFA_KEY")
+        if _looks_like_placeholder(mfa_key) or len(mfa_key) < 32:
+            problems.append("生产环境启用 MFA 时必须配置至少 32 位的非占位符 STORE_AGENT_MFA_KEY")
+
+    if production:
+        database_password = _env_value(values, "POSTGRES_PASSWORD")
+        if _looks_like_placeholder(database_password) or len(database_password) < 16:
+            problems.append("生产环境必须配置非占位符且至少 16 位的 POSTGRES_PASSWORD")
+
+        domain = _env_value(values, "DOMAIN").lower()
+        if _looks_like_placeholder(domain) or "." not in domain or "example" in domain:
+            problems.append("生产环境必须配置真实域名 DOMAIN，不能使用示例占位符")
+        email = _env_value(values, "ACME_EMAIL").lower()
+        if _looks_like_placeholder(email) or "@" not in email or "example" in email:
+            problems.append("生产环境必须配置真实 ACME_EMAIL，不能使用示例占位符")
+
+        base_url = _env_value(values, "STORE_AGENT_BASE_URL")
+        parsed = urlparse(base_url)
+        host = (parsed.hostname or "").lower()
+        invalid_host = (
+            not host
+            or host in {"localhost", "127.0.0.1", "::1"}
+            or host.endswith(".example.com")
+            or host.endswith(".example.invalid")
+            or host.endswith(".invalid")
+        )
+        if parsed.scheme != "https" or invalid_host:
+            problems.append("生产环境 STORE_AGENT_BASE_URL 必须是公网 HTTPS 地址，不能使用回环或示例域名")
+
+        for path_name in (
+            "STORE_AGENT_EVIDENCE_DIR",
+            "STORE_AGENT_IMPORT_INBOX",
+            "STORE_AGENT_BACKUP_LOCAL_ROOT",
+            "STORE_AGENT_OPS_LOCK",
+        ):
+            if not _env_value(values, path_name):
+                problems.append(f"生产环境缺少运行路径 {path_name}")
+
+    backup_storage = (_env_value(values, "STORE_AGENT_BACKUP_STORAGE") or "local").lower()
+    if backup_storage not in {"local", "s3"}:
+        problems.append(f"不支持的 STORE_AGENT_BACKUP_STORAGE：{backup_storage}")
+    elif backup_storage == "s3":
+        if not _env_value(values, "S3_BUCKET"):
+            problems.append("S3 备份缺少 S3_BUCKET")
+        if not _env_value(values, "S3_ACCESS_KEY_ID"):
+            problems.append("S3 备份缺少 S3_ACCESS_KEY_ID")
+        if not _env_value(values, "S3_SECRET_ACCESS_KEY"):
+            problems.append("S3 备份缺少 S3_SECRET_ACCESS_KEY")
+        if not (_env_value(values, "BACKUP_ENCRYPTION_KEY")
+                or _env_value(values, "BACKUP_ENCRYPTION_KEY_FILE")):
+            problems.append("S3 备份缺少 BACKUP_ENCRYPTION_KEY 或 BACKUP_ENCRYPTION_KEY_FILE")
+
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "selected": {
+            "approval_callback_provider": provider,
+            "alert_channel": alert_channel,
+            "backup_storage": backup_storage,
+        },
+    }
+
+
 def gate_report(root: Path, dsn: Optional[str] = None, config_path: Optional[Path] = None) -> dict[str, Any]:
     """把自检项汇总成给闸门用的一份报告。"""
     capabilities = scan_dangerous_capabilities(root)
     secrets_result = scan_secrets(root)
     retention = check_retention_policy(Path(config_path or Path(root) / "store_config.json"))
+    integrations = check_integration_config()
     items = [
         {"gate": "危险能力关闭", "ok": capabilities["ok"], "detail": capabilities},
         {"gate": "仓库无明文密钥", "ok": secrets_result["ok"], "detail": secrets_result},
         {"gate": "数据保留策略已配置", "ok": retention["ok"], "detail": retention},
+        {"gate": "生产集成配置已闭合", "ok": integrations["ok"], "detail": integrations},
     ]
     if dsn:
         try:

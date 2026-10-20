@@ -29,7 +29,7 @@
       <button class="ghost" id="logoutBtn">退出登录</button>
     </div>
     <div class="scope" id="scopeCard"><b id="scopeTitle">店长权限</b><span id="scopeText">可查看全店任务与经营诊断；高风险动作仍需审批。</span></div>
-    <div class="links" id="appLinks"><a href="/dashboard">经营看板 →</a><a href="/governance">审批与审计中心 →</a><a href="/settings">设置与成员 →</a><a href="/index.html">查看完整落地方案 →</a><div class="demo">本页面是本地 MVP。身份下拉框用于演示，不是真实登录；接入门店前必须换成企业身份认证。</div></div>
+    <div class="links" id="appLinks"><a href="/dashboard">经营看板 →</a><a href="/governance">审批与审计中心 →</a><a id="settingsLink" href="/settings">设置与成员 →</a><a href="/index.html">查看完整落地方案 →</a><div class="demo">已启用会话登录与 MFA；生产环境请使用 FastAPI 完整入口并配置强密钥。</div></div>
   </aside>
   <main>
     <header class="top" id="mainHeader"><div class="identity"><b id="identityName">武汉狮子座店店长</b><span id="taskCount">正在读取今日任务…</span></div><span class="badge">PILOT MVP</span></header>
@@ -81,7 +81,7 @@
       <div class="cards" id="taskCards"><div class="empty">正在读取今日任务…</div></div>
     </section>
     <section class="chat" id="chat">
-      <div class="welcome" id="welcome"><h2>随时问我门店运营问题</h2><p>我会结合你的身份、平台真实数据、今日任务和门店规则回答，并说明数据依据。</p><div class="suggestions"><button data-prompt="分析最近7天美团和抖音数据">分析平台数据</button><button data-prompt="我今天有什么任务？">今天做什么</button><button data-prompt="这些任务为什么生成？">为什么生成</button><button data-prompt="差评应该怎么处理？">差评怎么处理</button><button data-prompt="任务完成需要什么证据？">完成证据</button><button data-prompt="数据齐不齐？">数据齐不齐</button><button data-prompt="生成今日日报">今日日报</button></div></div>
+      <div class="welcome" id="welcome"><h2>随时问我门店运营问题</h2><p>我会结合你的身份、平台真实数据、今日任务和门店规则回答，并说明数据依据。</p><div class="suggestions"><button data-prompt="分析最近7天美团和抖音数据">分析平台数据</button><button data-prompt="对比昨天和前7天数据，为什么订单下降？">周期对比</button><button data-prompt="我今天有什么任务？">今天做什么</button><button data-prompt="这些任务为什么生成？">为什么生成</button><button data-prompt="差评应该怎么处理？">差评怎么处理</button><button data-prompt="任务完成需要什么证据？">完成证据</button><button data-prompt="数据齐不齐？">数据齐不齐</button><button data-prompt="生成今日日报">今日日报</button></div></div>
     </section>
     <footer class="composer" id="composer"><div class="compose-row"><textarea id="input" rows="1" placeholder="问问 Agent，例如：我今天有什么任务？"></textarea><button class="send" id="send">发送</button></div><p class="hint">请勿输入顾客完整手机号、身份证、工资或平台密钥。改价、赔付、警告、奖惩和发布不会被直接执行。</p></footer>
   </main>

@@ -306,6 +306,25 @@ create table if not exists memberships (
   primary key (tenant_id, store_id, user_id)
 );
 create index if not exists idx_memberships_user on memberships (user_id, status);
+create table if not exists channel_bindings (
+  binding_id text primary key,
+  tenant_id text not null default '',
+  store_id text not null,
+  provider text not null,
+  external_user_id text not null,
+  display_name text not null default '',
+  mobile_hash text not null default '',
+  mobile_masked text not null default '',
+  user_id text,
+  status text not null default 'active' check (status in ('active','disabled')),
+  created_by text not null default '',
+  created_at timestamptz not null,
+  updated_at timestamptz not null,
+  unique (tenant_id, store_id, provider, external_user_id)
+);
+create unique index if not exists ux_channel_bindings_mobile
+  on channel_bindings (tenant_id, store_id, provider, mobile_hash) where mobile_hash <> '';
+create index if not exists idx_channel_bindings_user on channel_bindings (tenant_id, store_id, user_id, status);
 
 create table if not exists auth_sessions (
   token_hash text primary key,          -- 只存 SHA-256，绝存明文令牌
@@ -440,6 +459,9 @@ create policy p_users_tenant on users using (tenant_id = current_setting('app.te
 alter table memberships enable row level security;
 drop policy if exists p_memberships_tenant on memberships;
 create policy p_memberships_tenant on memberships using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
+alter table channel_bindings enable row level security;
+drop policy if exists p_channel_bindings_tenant on channel_bindings;
+create policy p_channel_bindings_tenant on channel_bindings using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));
 alter table user_mfa enable row level security;
 drop policy if exists p_user_mfa_tenant on user_mfa;
 create policy p_user_mfa_tenant on user_mfa using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true));

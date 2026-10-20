@@ -27,9 +27,12 @@ DEFAULT_MAX_ITERATIONS = 4
 DEFAULT_MAX_TOOL_CALLS = 8
 
 SYSTEM_PROMPT = (
-    "你是门店运营助手。只依据工具返回的真实数据回答，不要编造数字；数据不足就明确说缺数。"
-    "你可以调用工具查询指标、数据质量、任务与日报。你没有任何写权限：改价、赔付、公开回复、"
-    "警告、奖惩、发布、上架都只能建议，必须由有权限的管理者审批。"
+    "你是门店运营助手。只依据工具返回的真实数据回答，不要编造数字；数据不足就明确说缺数并给出补数步骤。"
+    "你可以调用工具查询指标、数据质量、任务与日报。涉及经营变化、优化、方案、提升、建议时，"
+    "必须优先调用 diagnose_store_change；涉及任务时优先调用 get_task_detail。"
+    "回答必须包含：结论、原因或关键依据、优先行动建议、验证指标、风险与审批提醒。"
+    "行动建议要说明责任角色、证据/输出和复盘时间；不要只罗列数据。"
+    "你没有任何写权限：改价、赔付、公开回复、警告、奖惩、发布、上架都只能建议，必须由有权限的管理者审批。"
     "不得透露其他员工、其他门店、工资、密钥、顾客完整手机号等敏感信息。"
     "回答末尾用一句说明依据（用了哪些工具与统计区间）。"
 )
@@ -59,6 +62,23 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
              {"type": "object", "properties": {
                  "days": {"type": "integer", "minimum": 1, "maximum": 90, "description": "统计天数，默认 7"},
                  "platform": {"type": "string", "enum": ["meituan", "douyin"], "description": "只看某个平台"}},
+              "required": []}),
+    ToolSpec("get_period_comparison", "metrics:read",
+             "查询日/近7天两组周期对比，包含本期、上期、变化率、覆盖率、缺失日期与数据来源。",
+             {"type": "object", "properties": {
+                 "anchor": {"type": "string", "description": "auto / today / yesterday / YYYY-MM-DD，默认 auto"},
+                 "windows": {"type": "array", "items": {"type": "string", "enum": ["day", "week"]},
+                             "description": "默认 day 与 week"},
+                 "platform": {"type": "string", "enum": ["meituan", "douyin"]},
+                 "metric": {"type": "string", "description": "可选指标键，如 paid_orders"}},
+              "required": []}),
+    ToolSpec("diagnose_store_change", "metrics:read",
+             "对周期对比结果做确定性经营归因，返回可能原因、证据、置信度和建议动作。",
+             {"type": "object", "properties": {
+                 "anchor": {"type": "string", "description": "auto / today / yesterday / YYYY-MM-DD，默认 auto"},
+                 "windows": {"type": "array", "items": {"type": "string", "enum": ["day", "week"]}},
+                 "platform": {"type": "string", "enum": ["meituan", "douyin"]},
+                 "metric": {"type": "string"}},
               "required": []}),
     ToolSpec("get_data_quality", "quality:read",
              "查询数据质量：缺日、日环比跳变、导入批次与新鲜度。",
@@ -200,6 +220,22 @@ class ToolCallingAgent:
             return {"window": {"start": summary.get("start_date"), "end": summary.get("end_date"), "days": days},
                     "has_data": summary.get("has_data"), "platforms": summary.get("platforms"),
                     "financial_included": summary.get("financial_included", True)}
+        if name == "get_period_comparison":
+            windows = arguments.get("windows") or ("day", "week")
+            if isinstance(windows, str):
+                windows = tuple(item for item in windows.split(",") if item)
+            return tools.period_comparison(
+                user, anchor=arguments.get("anchor") or "auto", windows=tuple(windows),
+                platform=arguments.get("platform") or None, metric=arguments.get("metric") or None,
+            )
+        if name == "diagnose_store_change":
+            windows = arguments.get("windows") or ("day", "week")
+            if isinstance(windows, str):
+                windows = tuple(item for item in windows.split(",") if item)
+            return tools.diagnose_store_change(
+                user, anchor=arguments.get("anchor") or "auto", windows=tuple(windows),
+                platform=arguments.get("platform") or None, metric=arguments.get("metric") or None,
+            )
         if name == "get_data_quality":
             quality = tools.data_quality(days=self._int(arguments.get("days"), 30, 1, 365))
             return {"window": quality["window"], "summary": quality["summary"],
@@ -210,16 +246,21 @@ class ToolCallingAgent:
             return {"days": quality["days"], "gaps": gaps, "has_gaps": bool(gaps)}
         if name == "get_tasks":
             tasks = tools.tasks_for(user, status=arguments.get("status") or None, limit=20)
-            return [{"task_id": t["task_id"], "title": t["title"], "status": t["status"],
-                     "priority": t["priority"], "assignee_id": t["assignee_id"], "due_at": t["due_at"],
+            return [{"task_id": t["task_id"], "category": t["category"], "title": t["title"],
+                     "status": t["status"], "priority": t["priority"], "assignee_id": t["assignee_id"],
+                     "due_at": t["due_at"], "target": t.get("target") or {},
+                     "reason": t.get("reason") or "", "evidence_required": t.get("evidence_required") or [],
                      "approval_required": t["approval_required"]} for t in tasks]
         if name == "get_task_detail":
             task_id = str(arguments.get("task_id") or "")
             if not task_id:
                 raise ValueError("缺少 task_id")
             detail = tools.task_detail(task_id, user)
-            return {"task_id": detail["task_id"], "title": detail["title"], "status": detail["status"],
-                    "priority": detail["priority"], "due_at": detail["due_at"], "reason": detail["reason"],
+            return {"task_id": detail["task_id"], "category": detail["category"], "title": detail["title"],
+                    "status": detail["status"], "priority": detail["priority"], "due_at": detail["due_at"],
+                    "assignee_id": detail.get("assignee_id") or "", "target": detail.get("target") or {},
+                    "reason": detail["reason"], "evidence_required": detail.get("evidence_required") or [],
+                    "approval_required": detail.get("approval_required", False),
                     "evidence": [{"type": e["evidence_type"], "ref": e["object_ref"]}
                                  for e in detail.get("evidence", [])],
                     "events": [{"from": e["from_status"], "to": e["to_status"]} for e in detail.get("events", [])]}

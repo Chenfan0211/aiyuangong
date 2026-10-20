@@ -54,6 +54,35 @@ services:
     networks: [internal]
     command: ["sh", "scripts/backup.sh"]
 
+
+  ops:
+    build: .
+    profiles: ["ops"]
+    restart: "no"
+    env_file: .env.production
+    environment:
+      STORE_AGENT_ENV: production
+      STORE_AGENT_METRICS_DB: postgresql://${POSTGRES_USER:-mall_ops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mall_ops}
+      STORE_AGENT_STORE_DB: postgresql://${POSTGRES_USER:-mall_ops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mall_ops}
+      STORE_AGENT_CHAT_DB: postgresql://${POSTGRES_USER:-mall_ops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-mall_ops}
+      STORE_AGENT_BASE_URL: ${STORE_AGENT_BASE_URL:?STORE_AGENT_BASE_URL is required}
+      STORE_AGENT_BACKUP_STORAGE: ${STORE_AGENT_BACKUP_STORAGE:-local}
+      STORE_AGENT_BACKUP_LOCAL_ROOT: /app/data/backups
+      STORE_AGENT_EVIDENCE_DIR: /app/evidence
+      STORE_AGENT_IMPORT_INBOX: /app/imports/inbox
+      STORE_AGENT_OPS_LOCK: /app/data/ops/daily_sync.lock
+      BACKUP_ENCRYPTION_KEY_FILE: /app/data/backups/.backup-key
+    volumes:
+      - backup_data:/app/data
+      - evidence_data:/app/evidence:ro
+      - imports_inbox:/app/imports/inbox:ro
+      - ./store_config.json:/app/store_config.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+    command: ["python", "scripts/daily_sync.py"]
+
   caddy:
     image: caddy:2.8
     restart: unless-stopped

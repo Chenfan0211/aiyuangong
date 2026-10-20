@@ -23,12 +23,17 @@ if str(ROOT) not in sys.path:
 
 from ops_runner import DEFAULT_STEP_NAMES, Step, StepFailure, build_alerter  # noqa: E402
 from ops_runner import OpsRunner  # noqa: E402
+from security import check_integration_config  # noqa: E402
 
 NOTIFY_MESSAGE_KINDS = ("daily", "overdue", "approvals", "quality")
 
 
 def _env_path(name: str, fallback: Path) -> Path:
     return Path(os.getenv(name) or fallback)
+
+
+def _evidence_dir() -> Path:
+    return _env_path("STORE_AGENT_EVIDENCE_DIR", _env_path("EVIDENCE_ROOT_DIR", ROOT / "evidence"))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,7 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inbox", type=Path, default=_env_path(
         "STORE_AGENT_IMPORT_INBOX", ROOT / "imports" / "inbox"))
     parser.add_argument("--backup-dir", type=Path, default=_env_path(
-        "STORE_AGENT_BACKUP_DIR", ROOT / "data" / "backup"))
+        "STORE_AGENT_BACKUP_LOCAL_ROOT",
+        _env_path("STORE_AGENT_BACKUP_DIR", ROOT / "data" / "backup")))
+    parser.add_argument("--evidence-dir", type=Path, default=_evidence_dir())
     parser.add_argument("--outbox-dir", type=Path, default=_env_path(
         "STORE_AGENT_OUTBOX_DIR", ROOT / "data" / "outbox"))
     parser.add_argument("--lock-file", type=Path, default=_env_path(
@@ -104,7 +111,7 @@ def build_backup_commands(args: argparse.Namespace) -> list[list[str]]:
     store_db = str(getattr(args, "store_db"))
     tenant_id = str(getattr(args, "tenant_id", "") or "")
     store_id = str(getattr(args, "store_id", "") or "")
-    evidence_dir = _env_path("STORE_AGENT_EVIDENCE_DIR", ROOT / "evidence")
+    evidence_dir = Path(getattr(args, "evidence_dir", _evidence_dir()))
     backup_dir = Path(getattr(args, "backup_dir"))
     backup_manager = ROOT / "backup_manager.py"
 
@@ -154,7 +161,7 @@ def build_default_steps(args: argparse.Namespace) -> list[Step]:
     tenant_id, config_store_id = _config_ids(config)
     tenant_id = str(getattr(args, "tenant_id", "") or tenant_id)
     store_id = str(getattr(args, "store_id") or config_store_id or "")
-    evidence_dir = _env_path("STORE_AGENT_EVIDENCE_DIR", ROOT / "evidence")
+    evidence_dir = Path(getattr(args, "evidence_dir", _evidence_dir()))
     backup_manager = ROOT / "backup_manager.py"
     inbox = Path(getattr(args, "inbox"))
     backup_dir = Path(getattr(args, "backup_dir"))
@@ -235,6 +242,10 @@ def _write_log(path: Path, report: dict[str, Any]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    integration = check_integration_config()
+    if not integration["ok"]:
+        print("生产集成配置未闭合：" + "；".join(integration["problems"]), file=sys.stderr)
+        return 2
     config_tenant, config_store = _config_ids(Path(args.config))
     args.tenant_id = str(args.tenant_id or config_tenant)
     args.store_id = str(args.store_id or config_store or "WH-LION-001")
