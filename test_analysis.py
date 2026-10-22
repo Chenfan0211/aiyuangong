@@ -362,5 +362,49 @@ class StoreAnalysisTests(unittest.TestCase):
         json.dumps(self.analysis.diagnose(comparison), ensure_ascii=False)
 
 
+class RuleVersionTests(unittest.TestCase):
+    """第 3 期第 5 步：规则版本"读表优先 + 代码兜底"。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        base = load_config(ROOT / "store_config.json")
+        self.config = {**base, "rules": {**base.get("rules", {}), "fresh_days": 400}}
+        self.metrics = PlatformMetricStore(self.root / "metrics.db", tenant_id=TENANT)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_load_rule_versions_falls_back_to_code_constants(self):
+        from analysis import load_rule_versions
+        from rule_store import RuleStore
+        store = RuleStore(self.root / "rules.db")
+        expected = {"period_comparison": RULE_VERSION, "store_diagnosis": DIAGNOSIS_RULE_VERSION}
+        self.assertEqual(load_rule_versions(store), expected)
+        self.assertEqual(load_rule_versions(None), expected)
+
+    def test_only_approved_version_wins(self):
+        from analysis import load_rule_versions
+        from rule_store import RuleStore
+        store = RuleStore(self.root / "rules.db")
+        draft = store.save_draft("period_comparison", scope={"store_id": STORE},
+                                 condition={"kind": "period_comparison"}, action_template={})
+        self.assertEqual(load_rule_versions(store)["period_comparison"], RULE_VERSION)
+        store.decide("period_comparison", draft["version"], "approved")
+        self.assertEqual(load_rule_versions(store)["period_comparison"], str(draft["version"]))
+        self.assertEqual(load_rule_versions(store)["store_diagnosis"], DIAGNOSIS_RULE_VERSION)
+
+    def test_analysis_accepts_rule_store(self):
+        from rule_store import RuleStore
+        store = RuleStore(self.root / "rules.db")
+        draft = store.save_draft("store_diagnosis", scope={"store_id": STORE},
+                                 condition={"kind": "store_diagnosis"}, action_template={})
+        store.decide("store_diagnosis", draft["version"], "approved")
+        analysis = StoreAnalysis(self.config, self.metrics,
+                                 config_path=ROOT / "store_config.json", rule_store=store)
+        self.assertEqual(analysis.rule_versions["store_diagnosis"], str(draft["version"]))
+        self.assertEqual(analysis.rule_versions["period_comparison"], RULE_VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
@@ -38,9 +39,25 @@ from ops_store import OpsStore, OpsStoreError
 from auth import AuthError, AuthStore, AccountLocked, CredentialsError, ROLES, SessionInvalid, SecurityContext, permissions_for
 from channel_store import ChannelBindingError, ChannelBindingStore
 from governance import ApprovalStore, AuditCenter, ToolRunLog, apply_decision, log_tool_call
-from platform_data import PlatformMetricStore
+from platform_data import DataValidationError, PlatformMetricStore
 from llm_agent import OpenAIToolResponder, ToolCallingAgent
 from reporting import StoreReporter
+from rule_store import RuleStore, RuleStoreError
+from rule_outcomes import RuleOutcomeStore
+from appeal import AppealConflict, AppealError, AppealStore
+from inspection import INSPECTION_CATEGORY, InspectionError, InspectionStore
+from capabilities import build_registry
+from knowledge import KnowledgeError, KnowledgeStore
+from sop import SopError, SopStore
+from sop_runtime import SopRuntime, SopRuntimeError
+from tool_manifest import ManifestError, export_template_zip
+from tool_registry import ToolRegistry, ToolRegistryError
+from memory import MemoryError, MemoryStore
+from skill_evolution import EvolutionError, SkillEvolution
+from digital_employee import DigitalEmployeeError, DigitalEmployeeStore
+from team import TeamError, TeamStore
+from competitor import MATCH_STATUSES, CompetitorStore
+from store_ops_data import StoreOpsDataStore, import_inbox as import_ops_inbox
 from registry import RegistryError, RegistryStore
 from runtime_pages import render_demo_agent_page
 from security import ReplayGuard, check_integration_config, verify_inbound
@@ -124,8 +141,23 @@ def default_evidence_dir() -> Path:
     return Path(configured).expanduser() if configured else ROOT / "evidence"
 
 
+def default_import_inbox() -> Path:
+    """门店侧数据的收件箱：只允许从这个目录导入，不接受请求方传入任意路径。"""
+    configured = os.getenv("STORE_AGENT_IMPORT_INBOX")
+    return Path(configured).expanduser() if configured else ROOT / "imports" / "inbox"
+
+
 
 # ---------------- 请求模型（同时生成 OpenAPI 文档） ----------------
+
+class CompetitorMatchRequest(BaseModel):
+    platform: str = Field(..., description="本店套餐所在平台：meituan / douyin")
+    package_id: str = Field(..., max_length=200, description="本店套餐 ID")
+    competitor_id: str = Field(..., max_length=200, description="竞品门店 ID（须已登记）")
+    competitor_package_name: str = Field(..., max_length=200, description="竞品套餐名（须已有采样）")
+    status: str = Field("confirmed", description="confirmed / pending / rejected，默认 confirmed")
+    note: Optional[str] = Field(None, max_length=500)
+
 
 class LoginRequest(BaseModel):
     username: str = Field(..., description="用户名")
@@ -193,6 +225,147 @@ class ApprovalDecision(BaseModel):
     reason: str = ""
 
 
+class RuleCreate(BaseModel):
+    rule_key: str = Field(..., min_length=1, max_length=100)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    condition: dict[str, Any] = Field(default_factory=dict)
+    action_template: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuleVersionCreate(BaseModel):
+    condition: dict[str, Any] = Field(default_factory=dict)
+    action_template: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuleDecision(BaseModel):
+    version: int = Field(..., ge=1)
+    status: str = Field(..., description="approved / paused / retired")
+    note: str = Field("", max_length=500)
+
+
+class InspectionItemRequest(BaseModel):
+    item_key: str = Field(..., min_length=1, max_length=100)
+    title: str = Field(..., min_length=1, max_length=200)
+    evidence_required: list[str] = Field(default_factory=list)
+    required: bool = True
+    assignee_role: str = Field("store_manager", max_length=50)
+    threshold: dict[str, Any] = Field(default_factory=dict)
+
+
+class InspectionTemplateRequest(BaseModel):
+    template_key: str = Field(..., min_length=1, max_length=100)
+    name: str = Field(..., min_length=1, max_length=100)
+    items: list[InspectionItemRequest] = Field(default_factory=list)
+    activate: bool = Field(False, description="创建后立即生效（同 key 旧生效版本自动退役）")
+
+
+class InspectionRunRequest(BaseModel):
+    template_id: Optional[str] = Field(None, description="指定模板版本；缺省用该 key 的生效版本")
+    template_key: str = Field("daily", max_length=100)
+    day: str = Field(..., description="巡店日期 YYYY-MM-DD")
+    assignee: str = Field("店长", max_length=50)
+
+
+class AppealRequest(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=200)
+    reason: str = Field(..., min_length=1, max_length=1000)
+
+
+class AppealDecisionRequest(BaseModel):
+    decision: str = Field(..., description="accepted / rejected")
+    note: str = Field("", max_length=1000)
+
+
+class KnowledgeDocumentRequest(BaseModel):
+    base_id: Optional[str] = Field(None, max_length=100, description="已有知识库 id；缺省时用 base_key 自动创建/复用")
+    base_key: str = Field("ops-manual", max_length=100, description="知识库 key（缺省 ops-manual）")
+    base_name: str = Field("", max_length=100, description="首次创建知识库时的名称")
+    title: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, max_length=200000)
+    source_name: str = Field("", max_length=200)
+    doc_type: str = Field("markdown", description="text / markdown")
+
+
+class KnowledgeSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    base_id: Optional[str] = Field(None, max_length=100)
+    limit: int = Field(5, ge=1, le=10)
+
+
+class SopCreateRequest(BaseModel):
+    sop_key: str = Field(..., min_length=1, max_length=100)
+    name: str = Field(..., min_length=1, max_length=100)
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+    start_node: str = Field(..., min_length=1, max_length=100)
+    max_hours: float = Field(24, gt=0, le=24 * 30)
+    activate: bool = False
+
+
+class SopVersionRequest(BaseModel):
+    name: str = Field("", max_length=100)
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+    start_node: str = Field(..., min_length=1, max_length=100)
+    max_hours: float = Field(24, gt=0, le=24 * 30)
+    activate: bool = False
+
+
+class SopRunRequest(BaseModel):
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class SopResumeRequest(BaseModel):
+    decision: str = Field("approved", description="approved / rejected（人工节点提交时忽略）")
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolInstanceRequest(BaseModel):
+    template_id: str = Field(..., min_length=1, max_length=100)
+    instance_key: str = Field(..., min_length=1, max_length=100)
+    credentials: dict[str, str] = Field(default_factory=dict, description="仅存哈希与掩码，不落明文")
+    network_policy: str = Field("", description="留空则继承模板策略")
+
+
+class ToolInvokeRequest(BaseModel):
+    payload: dict[str, Any] = Field(default_factory=dict)
+    timeout: Optional[float] = Field(None, ge=1, le=3600)
+
+
+class ToolImportRequest(BaseModel):
+    archive_base64: str = Field(..., min_length=1, description="模板 ZIP（导出时 secret 已清空）的 base64")
+
+
+class MemoryAbsorbRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+    user_id: Optional[str] = Field(None, max_length=100)
+
+
+class EvolutionDecisionRequest(BaseModel):
+    decision: str = Field("approved", description="approved / rejected")
+    note: str = Field("", max_length=500)
+
+
+class DigitalEmployeeRequest(BaseModel):
+    employee_key: str = Field(..., min_length=1, max_length=100)
+    name: str = Field(..., min_length=1, max_length=100)
+    role_profile: str = Field("", max_length=500)
+    capabilities: list[str] = Field(default_factory=list, description="引用第 5 期能力注册表的 id")
+
+
+class TeamRequest(BaseModel):
+    team_key: str = Field(..., min_length=1, max_length=100)
+    name: str = Field(..., min_length=1, max_length=100)
+    leader_employee_id: Optional[str] = Field(None, max_length=100)
+    human_fallback: str = Field("", max_length=100, description="人工兜底负责人")
+
+
+class TeamTaskRequest(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=200)
+    title: str = Field(..., min_length=1, max_length=200)
+    assignee_ref: Optional[str] = Field(None, max_length=100, description="留空表示挂到团队池等认领")
+
+
 class StatusRequest(BaseModel):
     session_id: str
     status: str = Field(..., description="accepted / done 由负责人；verified / rejected 仅管理者")
@@ -226,7 +399,8 @@ class AppContext:
     """一次进程内共享的依赖容器。"""
 
     def __init__(self, config_path: Path, metrics_db: Path, store_db: Path, chat_db: Path,
-                 auth_mode: str = "session", evidence_dir: Path = ROOT / "evidence"):
+                 auth_mode: str = "session", evidence_dir: Path = ROOT / "evidence",
+                 import_inbox: Optional[Path] = None):
         self.config_path = Path(config_path)
         file_config = load_config(self.config_path)
         tenant_id = str(file_config.get("tenant_id") or "")
@@ -235,20 +409,49 @@ class AppContext:
         self.config_revision = self.registry.current_revision(tenant_id, str(self.config.get("store_id") or ""))
         tenant_id = str(self.config.get("tenant_id") or "")
         self.metric_store = PlatformMetricStore(metrics_db, tenant_id=tenant_id)
+        self.ops_store = StoreOpsDataStore(store_db, tenant_id=tenant_id)
+        self.competitor_store = CompetitorStore(store_db, tenant_id=tenant_id,
+                                          ops_store=self.ops_store)
         self.task_store = TaskStore(store_db, tenant_id=tenant_id)
         self.evidence = EvidenceStore(store_db, root_dir=evidence_dir, tenant_id=tenant_id)
         self.outcomes = OutcomeTracker(store_db, tenant_id=tenant_id)
         self.auth = AuthStore(store_db, tenant_id=tenant_id)
         self.channel_bindings = ChannelBindingStore(store_db, tenant_id=tenant_id)
         self.replay_guard = ReplayGuard(store_db, tenant_id=tenant_id)
-        self.tools = StoreTools(self.config, self.metric_store, self.task_store, config_path=self.config_path)
+        # 第 3 期第 5 步：规则库在 StoreTools 之前构造，供分析类规则版本读取
+        self.rules = RuleStore(store_db, tenant_id=tenant_id)
+        self.knowledge = KnowledgeStore(store_db, tenant_id=tenant_id)
+        self.rule_outcomes = RuleOutcomeStore(store_db, tenant_id=tenant_id)
+        self.inspections = InspectionStore(store_db, tenant_id=tenant_id)
+        self.appeals = AppealStore(store_db, tenant_id=tenant_id)
+        self.tools = StoreTools(self.config, self.metric_store, self.task_store,
+                                config_path=self.config_path, ops_store=self.ops_store,
+                                competitor_store=self.competitor_store, rule_store=self.rules,
+                                knowledge_store=self.knowledge)
         self.ops = OpsStore(store_db, tenant_id=tenant_id, store_id=self.store_id)
         self.sessions = AgentSessionStore(chat_db, tenant_id=tenant_id)
         self.approvals = ApprovalStore(store_db, tenant_id=tenant_id)
+        # 第 7 期：SOP 运行时（与 task/approval 编排，不新建审批通道）
+        self.sop_runtime = SopRuntime(store_db, tenant_id=tenant_id,
+                                      task_store=self.task_store, approval_store=self.approvals)
         self.tool_log = ToolRunLog(store_db, tenant_id=tenant_id)
+        # 第 5 期：能力注册表（从 ToolSpec 派生；工作口径与 llm_agent 完全一致）
+        self.capabilities = build_registry(tenant_id=tenant_id, store_id=self.store_id,
+                                           tool_log=self.tool_log)
+        # 第 8 期：工具模板/实例注册表（凭据只存哈希；调用走受控沙箱）
+        self.tool_registry = ToolRegistry(store_db, tenant_id=tenant_id, tool_log=self.tool_log)
+        # 第 9 期：长期记忆与进化提案（提案只记录，不改运行行为）
+        self.memory = MemoryStore(store_db, tenant_id=tenant_id)
+        self.evolution = SkillEvolution(store_db, tenant_id=tenant_id, memory_store=self.memory)
+        # 第 10 期：数字员工与团队（领导=数字员工 + 人工兜底；任务=指派 + 认领）
+        self.workforce = DigitalEmployeeStore(store_db, tenant_id=tenant_id,
+                                             capability_registry=self.capabilities)
+        self.teams = TeamStore(store_db, tenant_id=tenant_id)
         self.audit_center = AuditCenter(store_db, tenant_id=tenant_id)
         self.reporter = StoreReporter(self.config, self.metric_store, self.task_store,
-                                      self.approvals, config_path=self.config_path)
+                                      self.approvals, config_path=self.config_path,
+                                      ops_store=self.ops_store)
+        self.import_inbox = Path(import_inbox) if import_inbox is not None else default_import_inbox()
         llm_responder = OpenAICompatibleResponder.from_environment()
         tool_responder = OpenAIToolResponder.from_environment()
         tool_agent = None
@@ -270,9 +473,10 @@ def create_app(
     chat_db: Path = ROOT / "data" / "agent_demo.db",
     auth_mode: str = "session",
     evidence_dir: Optional[Path] = None,
+    import_inbox: Optional[Path] = None,
 ) -> FastAPI:
     evidence_dir = Path(evidence_dir) if evidence_dir is not None else default_evidence_dir()
-    ctx = AppContext(config_path, metrics_db, store_db, chat_db, auth_mode, evidence_dir)
+    ctx = AppContext(config_path, metrics_db, store_db, chat_db, auth_mode, evidence_dir, import_inbox)
     integration = check_integration_config()
     if not integration["ok"]:
         raise RuntimeError("生产集成配置未闭合：" + "；".join(integration["problems"]))
@@ -1050,6 +1254,132 @@ def create_app(
              output_payload={"has_data": data["has_data"], "trend_points": len(data["trend"])})
         return data
 
+    # ---------------- 门店侧经营数据（第 1 期） ----------------
+
+    @app.get("/api/ops-data/status", tags=["门店数据"],
+             summary="门店侧数据新鲜度（开台/时段/库存/商圈）")
+    def ops_data_status(context: SecurityContext = Depends(require("metrics:read"))) -> dict[str, Any]:
+        payload = ctx.ops_store.status(ctx.store_id)
+        _log("api:ops_data_status", context, input_payload={}, output_payload={"has_data": payload["has_data"]})
+        return payload
+
+    @app.get("/api/ops-data/summary", tags=["门店数据"],
+             summary="门店侧数据摘要（开台与客流 / 时段分布 / 库存预警）")
+    def ops_data_summary(days: int = Query(7, ge=1, le=90),
+                         context: SecurityContext = Depends(require("metrics:read"))) -> dict[str, Any]:
+        summary = ctx.ops_store.summary(ctx.store_id, days=days)
+        _log("api:ops_data_summary", context, input_payload={"days": days},
+             output_payload={"has_data": summary.has_data, "alerts": len(summary.alerts)})
+        return {
+            "store_id": summary.store_id,
+            "days": summary.days,
+            "has_data": summary.has_data,
+            "traffic": summary.traffic,
+            "time_slots": summary.time_slots,
+            "inventory": summary.inventory,
+            "alerts": summary.alerts,
+        }
+
+    @app.post("/api/ops-data/import", tags=["门店数据"],
+              summary="从收件箱导入门店侧经营数据（只读配置的 inbox，不接受任意路径）")
+    def ops_data_import(context: SecurityContext = Depends(require("ops:import"))) -> dict[str, Any]:
+        payload = import_ops_inbox(ctx.import_inbox, ctx.store_id, ctx.metric_store,
+                                   ctx.ops_store, ctx.competitor_store)
+        _log("api:ops_data_import", context, input_payload={"inbox": str(ctx.import_inbox)},
+             output_payload={"file_count": payload["file_count"], "failed_count": payload["failed_count"]})
+        if payload["failed_count"]:
+            ctx.auth.record_audit(
+                event_type="ops_data_import_failed", actor_type="user", actor_id=context.user_id,
+                tenant_id=context.tenant_id, store_id=context.store_id,
+                object_type="ops_import_inbox", object_id=str(payload["failed_count"]),
+            )
+        return payload
+
+    # ---------------- 竞品匹配（第 2 期 C 批：人工确认是硬闸门） ----------------
+
+    @app.get("/api/competitor/matches", tags=["竞品"],
+             summary="竞品匹配清单（已确认 / 待确认 / 已驳回 + 尚未匹配的竞品套餐）")
+    def competitor_matches(
+        status: Optional[str] = Query(None, description="按状态过滤：pending / confirmed / rejected"),
+        context: SecurityContext = Depends(require("metrics:read")),
+    ) -> dict[str, Any]:
+        if status is not None and status not in MATCH_STATUSES:
+            raise HTTPException(status_code=400,
+                                detail="status 只支持：" + "、".join(MATCH_STATUSES))
+        try:
+            all_matches = ctx.competitor_store.list_matches(ctx.store_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        counts = {name: sum(1 for item in all_matches if item["status"] == name)
+                  for name in MATCH_STATUSES}
+        shown = [item for item in all_matches if status is None or item["status"] == status]
+        unmatched = ctx.competitor_store.unmatched_competitor_packages(ctx.store_id)
+        _log("api:competitor_matches", context, input_payload={"status": status},
+             output_payload={"shown": len(shown), "unmatched": len(unmatched)})
+        return {
+            "store_id": ctx.store_id,
+            "matches": shown,
+            "counts": counts,
+            "unmatched_competitor_packages": unmatched,
+            "note": "只有 confirmed 的匹配会进入价格与套餐对比；pending / rejected 一律不参与。",
+        }
+
+    @app.post("/api/competitor/matches", tags=["竞品"],
+              summary="登记或更新一条竞品匹配（人工确认，需 competitor:match 权限）")
+    def competitor_match_upsert(
+        payload: CompetitorMatchRequest,
+        context: SecurityContext = Depends(require("competitor:match")),
+    ) -> dict[str, Any]:
+        try:
+            result = ctx.competitor_store.upsert_match(
+                ctx.store_id,
+                platform=payload.platform,
+                package_id=payload.package_id,
+                competitor_id=payload.competitor_id,
+                competitor_package_name=payload.competitor_package_name,
+                status=payload.status,
+                note=payload.note,
+                actor_id=context.user_id,
+            )
+        except DataValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        record = result["record"]
+        ctx.auth.record_audit(
+            event_type=f"competitor_match_{record['status']}", actor_type="user",
+            actor_id=context.user_id, tenant_id=context.tenant_id, store_id=context.store_id,
+            object_type="competitor_match",
+            object_id=f"{record['platform']}:{record['package_id']}"
+                      f"<->{record['competitor_id']}:{record['competitor_package_name']}",
+            before=(None if result["previous_status"] is None
+                    else {"status": result["previous_status"]}),
+            after={"status": record["status"], "note": record["note"]},
+        )
+        _log("api:competitor_match_upsert", context,
+             input_payload={"platform": record["platform"], "package_id": record["package_id"],
+                            "competitor_id": record["competitor_id"], "status": record["status"]},
+             output_payload={"created": result["created"], "status": record["status"]})
+        return {"created": result["created"], "previous_status": result["previous_status"],
+                "match": record}
+
+    @app.get("/api/competitor/compare", tags=["竞品"],
+             summary="竞品四维对比：价格 / 套餐 / 活动 / 商圈变化")
+    def competitor_compare(
+        days: Optional[int] = Query(None, ge=1, le=365,
+                                    description="覆盖默认窗口（默认 28 天）"),
+        context: SecurityContext = Depends(require("metrics:read")),
+    ) -> dict[str, Any]:
+        config = dict(ctx.config)
+        if days:
+            rules = dict(config.get("rules") or {})
+            rules["competitor_window_days"] = int(days)
+            config["rules"] = rules
+        data = ctx.competitor_store.compare(ctx.store_id, config)
+        _log("api:competitor_compare", context, input_payload={"days": days},
+             output_payload={"has_data": data["has_data"],
+                             "samples": data["price"]["sample_size"],
+                             "confirmed_matches": data["packages"]["confirmed_match_count"]})
+        return data
+
     def _build_report(kind: str, anchor_date: str, context: SecurityContext) -> dict[str, Any]:
         try:
             builder = ctx.reporter.weekly_report if kind == "weekly" else ctx.reporter.monthly_report
@@ -1103,6 +1433,18 @@ def create_app(
     @app.post("/api/approvals/{approval_id}/decide", tags=["治理"], summary="审批决策（需 approvals:decide）")
     def approval_decide(approval_id: str, payload: ApprovalDecision,
                         context: SecurityContext = Depends(require("approvals:decide"))) -> dict[str, Any]:
+        if payload.decision == "approved":
+            # 第 4 期红线：申诉未结案时奖惩不得生效
+            try:
+                approval = ctx.approvals.get(approval_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            blocker = ctx.appeals.blocker_for(context.store_id, approval.get("task_id"))
+            if blocker:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"任务 {blocker['task_id']} 存在未结案申诉（{blocker['appeal_id']}），"
+                            "申诉结案前奖惩不得生效"))
         try:
             result = apply_decision(ctx.approvals, ctx.task_store, approval_id, payload.decision,
                                     context.display_name, payload.reason)
@@ -1116,6 +1458,508 @@ def create_app(
                               after={"status": result["approval"]["status"], "reason": payload.reason,
                                      "task_status": (result["task"] or {}).get("status")})
         return result
+
+    @app.get("/api/rules", tags=["治理"], summary="规则库列表（需 rules:read）")
+    def rules_list(rule_key: Optional[str] = Query(None, max_length=100),
+                   status: Optional[str] = Query(None, description="draft / approved / paused / retired"),
+                   context: SecurityContext = Depends(require("rules:read"))) -> dict[str, Any]:
+        items = ctx.rules.list_rules(rule_key)
+        if status:
+            items = [item for item in items if item["status"] == status]
+        _log("api:rules", context, input_payload={"rule_key": rule_key, "status": status},
+             output_payload={"count": len(items)})
+        return {"store_id": context.store_id, "rule_key": rule_key, "status_filter": status or "all",
+                "count": len(items), "rules": items}
+
+    @app.post("/api/rules", tags=["治理"], summary="新建规则草稿（需 rules:write）")
+    def rule_create(payload: RuleCreate,
+                    context: SecurityContext = Depends(require("rules:write"))) -> dict[str, Any]:
+        if ctx.rules.list_rules(payload.rule_key):
+            raise HTTPException(status_code=409,
+                                detail=f"规则 {payload.rule_key} 已存在；改阈值请新增版本")
+        record = ctx.rules.save_draft(payload.rule_key, scope=payload.scope,
+                                      condition=payload.condition,
+                                      action_template=payload.action_template)
+        ctx.auth.record_audit(event_type="rule_draft_created", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="action_rule",
+                              object_id=f"{payload.rule_key}@v{record['version']}",
+                              after={"rule_key": payload.rule_key, "version": record["version"]})
+        return record
+
+    @app.post("/api/rules/{rule_key}/versions", tags=["治理"], summary="新增规则版本草稿（需 rules:write）")
+    def rule_new_version(rule_key: str, payload: RuleVersionCreate,
+                         context: SecurityContext = Depends(require("rules:write"))) -> dict[str, Any]:
+        existing = ctx.rules.list_rules(rule_key)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"规则 {rule_key} 不存在")
+        record = ctx.rules.save_draft(rule_key, scope=existing[0]["scope"],
+                                      condition=payload.condition,
+                                      action_template=payload.action_template)
+        ctx.auth.record_audit(event_type="rule_draft_created", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="action_rule",
+                              object_id=f"{rule_key}@v{record['version']}",
+                              after={"rule_key": rule_key, "version": record["version"]})
+        return record
+
+    @app.post("/api/rules/{rule_key}/decide", tags=["治理"], summary="审批/暂停/退役规则版本（需 rules:decide）")
+    def rule_decide(rule_key: str, payload: RuleDecision,
+                    context: SecurityContext = Depends(require("rules:decide"))) -> dict[str, Any]:
+        if not ctx.rules.get_rule(rule_key, payload.version):
+            raise HTTPException(status_code=404, detail=f"规则 {rule_key} v{payload.version} 不存在")
+        try:
+            record = ctx.rules.decide(rule_key, payload.version, payload.status,
+                                      actor_id=context.display_name, note=payload.note)
+        except RuleStoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="rule_decided", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="action_rule",
+                              object_id=f"{rule_key}@v{payload.version}",
+                              after={"status": record["status"], "note": payload.note,
+                                     "approved_by": record.get("approved_by")})
+        return record
+
+    @app.get("/api/rules/{rule_key}/outcomes", tags=["治理"],
+             summary="规则效果归因与调参提案（需 rules:read；只读提案，不改规则）")
+    def rule_outcomes_read(rule_key: str, window_days: Optional[int] = Query(None, ge=1, le=365),
+                           context: SecurityContext = Depends(require("rules:read"))) -> dict[str, Any]:
+        items = ctx.rule_outcomes.list(context.store_id, rule_key=rule_key, window_days=window_days)
+        _log("api:rule_outcomes", context, input_payload={"rule_key": rule_key, "window_days": window_days},
+             output_payload={"count": len(items)})
+        return {"store_id": context.store_id, "rule_key": rule_key, "window_days": window_days,
+                "count": len(items), "outcomes": items}
+
+    @app.get("/api/inspection-templates", tags=["巡店"], summary="巡店模板列表（需 inspection:read）")
+    def inspection_templates(template_key: Optional[str] = Query(None, max_length=100),
+                             context: SecurityContext = Depends(require("inspection:read"))) -> dict[str, Any]:
+        items = ctx.inspections.list_templates(context.store_id, template_key)
+        _log("api:inspection_templates", context, input_payload={"template_key": template_key},
+             output_payload={"count": len(items)})
+        return {"store_id": context.store_id, "count": len(items), "templates": items}
+
+    @app.post("/api/inspection-templates", tags=["巡店"], summary="新建巡店模板版本（需 inspection:manage）")
+    def inspection_template_create(payload: InspectionTemplateRequest,
+                                   context: SecurityContext = Depends(require("inspection:manage"))) -> dict[str, Any]:
+        try:
+            record = ctx.inspections.save_template(
+                context.store_id, payload.template_key, payload.name,
+                [item.model_dump() for item in payload.items], created_by=context.display_name)
+            if payload.activate:
+                record = ctx.inspections.activate(record["template_id"], context.display_name)
+        except InspectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="inspection_template_saved", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="inspection_template",
+                              object_id=record["template_id"],
+                              after={"template_key": record["template_key"], "version": record["version"],
+                                     "status": record["status"]})
+        return record
+
+    @app.post("/api/inspections", tags=["巡店"], summary="按模板生成巡店任务（需 inspection:submit）")
+    def inspection_create(payload: InspectionRunRequest,
+                          context: SecurityContext = Depends(require("inspection:submit"))) -> dict[str, Any]:
+        try:
+            if payload.template_id:
+                template = ctx.inspections.get_template(payload.template_id)
+            else:
+                template = ctx.inspections.active_template(context.store_id, payload.template_key)
+            tasks = ctx.inspections.generate_tasks(context.store_id, template["template_id"],
+                                                   payload.day, assignee=payload.assignee)
+        except InspectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        saved = ctx.task_store.save_plan({"date": payload.day, "tasks": tasks}, context.store_id)
+        ctx.auth.record_audit(event_type="inspection_generated", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="inspection_template",
+                              object_id=template["template_id"],
+                              after={"date": payload.day, "created": saved["created"]})
+        return {"store_id": context.store_id, "template_id": template["template_id"], "date": payload.day,
+                "created": saved["created"], "updated": saved["updated"], "task_ids": saved["task_ids"]}
+
+    @app.get("/api/inspections/{task_id}", tags=["巡店"], summary="巡店任务与缺项复核（需 inspection:read）")
+    def inspection_read(task_id: str,
+                        context: SecurityContext = Depends(require("inspection:read"))) -> dict[str, Any]:
+        try:
+            task = ctx.task_store.get_task(task_id)
+        except TaskStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if task.get("category") != INSPECTION_CATEGORY:
+            raise HTTPException(status_code=404, detail=f"不是巡店任务：{task_id}")
+        review = ctx.inspections.review(ctx.task_store, task_id)
+        return {"store_id": context.store_id, "task": task, **review}
+
+    @app.post("/api/appeals", tags=["巡店"], summary="提交申诉（需 appeals:submit，一任务一次）")
+    def appeal_create(payload: AppealRequest,
+                      context: SecurityContext = Depends(require("appeals:submit"))) -> dict[str, Any]:
+        try:
+            appeal = ctx.appeals.submit(context.store_id, payload.task_id,
+                                        context.user_id, payload.reason)
+        except AppealConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except AppealError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="appeal_submitted", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="appeal", object_id=appeal["appeal_id"],
+                              after={"task_id": appeal["task_id"], "reason": payload.reason})
+        return appeal
+
+    @app.post("/api/appeals/{appeal_id}/decide", tags=["巡店"], summary="受理申诉（需 appeals:decide）")
+    def appeal_decide(appeal_id: str, payload: AppealDecisionRequest,
+                      context: SecurityContext = Depends(require("appeals:decide"))) -> dict[str, Any]:
+        try:
+            appeal = ctx.appeals.decide(appeal_id, payload.decision, context.display_name, payload.note)
+        except AppealError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="appeal_decided", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="appeal", object_id=appeal_id,
+                              after={"status": appeal["status"], "note": payload.note,
+                                     "task_id": appeal["task_id"]})
+        return appeal
+
+    @app.get("/api/capabilities", tags=["能力"], summary="当前身份可用的能力清单（需 agent:chat）")
+    def capabilities_list(context: SecurityContext = Depends(require("agent:chat"))) -> dict[str, Any]:
+        user = {"user_id": context.user_id, "permissions": context.permissions,
+                "tenant_id": context.tenant_id, "store_id": context.store_id}
+        items = ctx.capabilities.available_for(user)
+        _log("api:capabilities", context, output_payload={"count": len(items)})
+        return {"store_id": context.store_id, "count": len(items),
+                "capabilities": [item.as_dict() for item in items]}
+
+    @app.get("/api/knowledge/bases", tags=["知识库"], summary="知识库列表（需 knowledge:read）")
+    def knowledge_bases(context: SecurityContext = Depends(require("knowledge:read"))) -> dict[str, Any]:
+        items = ctx.knowledge.list_bases(context.store_id)
+        _log("api:knowledge_bases", context, output_payload={"count": len(items)})
+        return {"store_id": context.store_id, "count": len(items), "bases": items}
+
+    @app.post("/api/knowledge/documents", tags=["知识库"], summary="导入知识文档（需 knowledge:manage，按内容幂等）")
+    def knowledge_document_create(payload: KnowledgeDocumentRequest,
+                                  context: SecurityContext = Depends(require("knowledge:manage"))) -> dict[str, Any]:
+        try:
+            base_id = payload.base_id
+            if not base_id:
+                base = ctx.knowledge.create_base(context.store_id, payload.base_key,
+                                                 payload.base_name or payload.base_key)
+                base_id = base["base_id"]
+            record = ctx.knowledge.ingest_document(
+                context.store_id, base_id, payload.title, payload.content,
+                source_name=payload.source_name, doc_type=payload.doc_type)
+        except KnowledgeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="knowledge_document_ingested", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="knowledge_document",
+                              object_id=record["document_id"],
+                              after={"base_id": base_id, "title": payload.title,
+                                     "duplicate": record.get("duplicate", False),
+                                     "chunk_count": record.get("chunk_count")})
+        return record
+
+    @app.post("/api/knowledge/search", tags=["知识库"],
+              summary="检索知识库（需 knowledge:read；无命中明确说明，不编造）")
+    def knowledge_search(payload: KnowledgeSearchRequest,
+                         context: SecurityContext = Depends(require("knowledge:read"))) -> dict[str, Any]:
+        result = ctx.knowledge.search(context.store_id, payload.query, base_id=payload.base_id,
+                                      limit=payload.limit)
+        if result.get("citations"):
+            ctx.knowledge.record_citations(context.store_id, payload.query, result["citations"])
+        _log("api:knowledge_search", context, input_payload={"query": payload.query},
+             output_payload={"has_match": result["has_match"], "count": result["count"]})
+        return result
+
+    @app.post("/api/sops", tags=["SOP"], summary="新建 SOP（首个版本，需 sop:manage）")
+    def sop_create(payload: SopCreateRequest,
+                   context: SecurityContext = Depends(require("sop:manage"))) -> dict[str, Any]:
+        if ctx.sop_runtime.sops.list_sops(context.store_id, payload.sop_key):
+            raise HTTPException(status_code=409,
+                                detail=f"SOP {payload.sop_key} 已存在；新版本请用 /versions")
+        try:
+            record = ctx.sop_runtime.sops.save_sop(
+                context.store_id, payload.sop_key, payload.name, payload.nodes, payload.edges,
+                start_node=payload.start_node, created_by=context.display_name,
+                max_hours=payload.max_hours)
+            if payload.activate:
+                record = ctx.sop_runtime.sops.activate(record["sop_id"], context.display_name)
+        except SopError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="sop_saved", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="sop", object_id=record["sop_id"],
+                              after={"sop_key": record["sop_key"], "version": record["version"],
+                                     "status": record["status"]})
+        return record
+
+    @app.post("/api/sops/{sop_id}/versions", tags=["SOP"], summary="新增 SOP 版本（需 sop:manage）")
+    def sop_new_version(sop_id: str, payload: SopVersionRequest,
+                        context: SecurityContext = Depends(require("sop:manage"))) -> dict[str, Any]:
+        try:
+            base = ctx.sop_runtime.sops.get_sop(sop_id)
+            record = ctx.sop_runtime.sops.save_sop(
+                base["store_id"], base["sop_key"], payload.name or base["name"],
+                payload.nodes, payload.edges, start_node=payload.start_node,
+                created_by=context.display_name, max_hours=payload.max_hours)
+            if payload.activate:
+                record = ctx.sop_runtime.sops.activate(record["sop_id"], context.display_name)
+        except SopError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="sop_version_saved", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="sop", object_id=record["sop_id"],
+                              after={"sop_key": record["sop_key"], "version": record["version"]})
+        return record
+
+    @app.post("/api/sops/{sop_id}/runs", tags=["SOP"], summary="发起 SOP 运行（需 sop:run）")
+    def sop_run_create(sop_id: str, payload: SopRunRequest,
+                       context: SecurityContext = Depends(require("sop:run"))) -> dict[str, Any]:
+        try:
+            run = ctx.sop_runtime.start(sop_id, store_id=context.store_id,
+                                        context=payload.context, actor=context.display_name)
+        except (SopError, SopRuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="sop_run_started", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="sop_run",
+                              object_id=run["run_id"],
+                              after={"sop_id": sop_id, "status": run["status"]})
+        return run
+
+    @app.get("/api/sop-runs/{run_id}", tags=["SOP"], summary="SOP 运行详情与步骤（需 sop:read）")
+    def sop_run_read(run_id: str,
+                     context: SecurityContext = Depends(require("sop:read"))) -> dict[str, Any]:
+        try:
+            run = ctx.sop_runtime.get_run(run_id)
+        except SopRuntimeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        graph = ctx.sop_runtime.sops.version_graph(run["sop_id"], run["sop_version"])
+        return {"run": run, "sop_version": graph["version"], "sop_key": graph["sop_key"],
+                "graph": graph["graph"]}
+
+    @app.post("/api/sop-runs/{run_id}/resume", tags=["SOP"],
+              summary="恢复运行（人工节点提交或审批回调，需 sop:run）")
+    def sop_run_resume(run_id: str, payload: SopResumeRequest,
+                       context: SecurityContext = Depends(require("sop:run"))) -> dict[str, Any]:
+        try:
+            current = ctx.sop_runtime.get_run(run_id)
+            if current["status"] == "waiting_human":
+                run = ctx.sop_runtime.submit_human(run_id, payload=payload.payload,
+                                                   actor=context.display_name)
+                event = "sop_human_submitted"
+            else:
+                run = ctx.sop_runtime.resume(run_id, decision=payload.decision,
+                                             payload=payload.payload, actor=context.display_name)
+                event = "sop_run_resumed"
+        except SopRuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type=event, actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="sop_run", object_id=run_id,
+                              after={"status": run["status"], "decision": payload.decision})
+        return run
+
+    @app.get("/api/tools", tags=["工具"], summary="工具模板与实例（需 tool:read）")
+    def tools_list(context: SecurityContext = Depends(require("tool:read"))) -> dict[str, Any]:
+        templates = ctx.tool_registry.list_templates(context.store_id)
+        instances = ctx.tool_registry.list_instances(context.store_id)
+        _log("api:tools", context, output_payload={"templates": len(templates),
+                                                  "instances": len(instances)})
+        return {"store_id": context.store_id, "templates": templates, "instances": instances}
+
+    @app.post("/api/tool-instances", tags=["工具"], summary="派生工具实例（需 tool:manage，凭据只存哈希）")
+    def tool_instance_create(payload: ToolInstanceRequest,
+                             context: SecurityContext = Depends(require("tool:manage"))) -> dict[str, Any]:
+        try:
+            record = ctx.tool_registry.create_instance(
+                context.store_id, payload.template_id, payload.instance_key,
+                credentials=payload.credentials, network_policy=payload.network_policy,
+                actor=context.display_name)
+        except ToolRegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="tool_instance_created", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="tool_instance",
+                              object_id=record["instance_id"],
+                              after={"template_id": payload.template_id,
+                                     "instance_key": payload.instance_key,
+                                     "has_credential": bool(record.get("credential"))})
+        return record
+
+    @app.post("/api/tool-instances/{instance_id}/invoke", tags=["工具"],
+              summary="在受控沙箱内调用工具实例（需 tool:invoke）")
+    def tool_instance_invoke(instance_id: str, payload: ToolInvokeRequest,
+                             context: SecurityContext = Depends(require("tool:invoke"))) -> dict[str, Any]:
+        try:
+            result = ctx.tool_registry.invoke(instance_id, payload.payload,
+                                              actor=context.display_name, timeout=payload.timeout,
+                                              store_id=context.store_id)
+        except ToolRegistryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return result
+
+    @app.get("/api/tool-templates/export", tags=["工具"],
+             summary="导出模板 ZIP（secret 字段一律清空，需 tool:manage）")
+    def tool_template_export(template_id: str = Query(..., min_length=1, max_length=100),
+                             context: SecurityContext = Depends(require("tool:manage"))):
+        try:
+            data = ctx.tool_registry.export_template(template_id)
+        except ToolRegistryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="tool_template_exported", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="tool_template",
+                              object_id=template_id, after={"bytes": len(data), "secrets": "cleared"})
+        return Response(content=data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{template_id}.zip"'})
+
+    @app.post("/api/tool-templates/import", tags=["工具"], summary="导入模板 ZIP（需 tool:manage）")
+    def tool_template_import(payload: ToolImportRequest,
+                             context: SecurityContext = Depends(require("tool:manage"))) -> dict[str, Any]:
+        try:
+            data = base64.b64decode(payload.archive_base64, validate=True)
+        except Exception as exc:                    # noqa: BLE001 - base64 非法一律 400
+            raise HTTPException(status_code=400, detail="archive_base64 不是合法 base64") from exc
+        try:
+            result = ctx.tool_registry.import_template(data, context.store_id,
+                                                       actor=context.display_name)
+        except ManifestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="tool_template_imported", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="tool_template",
+                              object_id=result["template"]["template_id"],
+                              after={"template_key": result["template"]["template_key"],
+                                     "credentials": sorted(result["credentials"])})
+        return result
+
+    @app.get("/api/memory", tags=["记忆"], summary="召回长期记忆（需 memory:read，按门店/用户隔离）")
+    def memory_recall(user_id: Optional[str] = Query(None, max_length=100),
+                      kind: Optional[str] = Query(None, description="profile / preference / fact"),
+                      limit: int = Query(50, ge=1, le=200),
+                      context: SecurityContext = Depends(require("memory:read"))) -> dict[str, Any]:
+        try:
+            items = ctx.memory.recall(context.store_id, user_id or context.user_id,
+                                      kind=kind, limit=limit)
+        except MemoryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"store_id": context.store_id, "count": len(items), "memories": items}
+
+    @app.post("/api/memory", tags=["记忆"], summary="抽取并沉淀记忆（需 memory:write）")
+    def memory_absorb(payload: MemoryAbsorbRequest,
+                      context: SecurityContext = Depends(require("memory:write"))) -> dict[str, Any]:
+        user_id = payload.user_id or context.user_id
+        items = ctx.memory.absorb(context.store_id, user_id, payload.text,
+                                  role=context.role, source="api")
+        # 偏好类记忆达到证据阈值时蒸馏出提案（只写提案，不改运行行为）
+        proposals = []
+        if any(item["kind"] == "preference" for item in items):
+            try:
+                proposals = ctx.evolution.distill_from_memories(context.store_id, user_id)
+            except EvolutionError:                  # 蒸馏失败不影响记忆沉淀
+                proposals = []
+        ctx.auth.record_audit(event_type="memory_absorbed", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="memory", object_id=user_id,
+                              after={"count": len(items),
+                                     "kinds": sorted({item["kind"] for item in items}),
+                                     "proposals": len(proposals)})
+        return {"store_id": context.store_id, "count": len(items), "memories": items,
+                "proposals_created": len(proposals)}
+
+    @app.get("/api/evolution/proposals", tags=["记忆"], summary="进化提案列表（需 evolution:read）")
+    def evolution_list(status: Optional[str] = Query(None, description="pending / approved / rejected"),
+                       context: SecurityContext = Depends(require("evolution:read"))) -> dict[str, Any]:
+        try:
+            items = ctx.evolution.list(context.store_id, status=status)
+        except EvolutionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"store_id": context.store_id, "count": len(items), "proposals": items}
+
+    @app.post("/api/evolution/proposals/{proposal_id}/decide", tags=["记忆"],
+              summary="人工确认提案（需 evolution:decide；只改提案状态，不改运行行为）")
+    def evolution_decide(proposal_id: str, payload: EvolutionDecisionRequest,
+                         context: SecurityContext = Depends(require("evolution:decide"))) -> dict[str, Any]:
+        try:
+            record = ctx.evolution.decide(proposal_id, payload.decision,
+                                          context.display_name, payload.note)
+        except EvolutionError as exc:
+            status_code = 409 if "当前状态" in str(exc) else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="evolution_decided", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="evolution_proposal",
+                              object_id=proposal_id,
+                              after={"decision": record["status"], "note": payload.note})
+        return record
+
+    @app.get("/api/digital-employees", tags=["团队"], summary="数字员工档案（需 workforce:read）")
+    def workforce_list(status: Optional[str] = Query(None),
+                       context: SecurityContext = Depends(require("workforce:read"))) -> dict[str, Any]:
+        try:
+            items = ctx.workforce.list(context.store_id, status=status)
+        except DigitalEmployeeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"store_id": context.store_id, "count": len(items), "employees": items}
+
+    @app.post("/api/digital-employees", tags=["团队"],
+              summary="登记数字员工（需 workforce:manage，能力引用第 5 期注册表）")
+    def workforce_hire(payload: DigitalEmployeeRequest,
+                       context: SecurityContext = Depends(require("workforce:manage"))) -> dict[str, Any]:
+        try:
+            record = ctx.workforce.hire(context.store_id, payload.employee_key, payload.name,
+                                        role_profile=payload.role_profile,
+                                        capabilities=payload.capabilities,
+                                        created_by=context.display_name)
+        except DigitalEmployeeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="digital_employee_hired", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="digital_employee",
+                              object_id=record["employee_id"],
+                              after={"employee_key": payload.employee_key,
+                                     "capabilities": record.get("capabilities")})
+        return record
+
+    @app.get("/api/teams", tags=["团队"], summary="团队列表（需 workforce:read）")
+    def teams_list(context: SecurityContext = Depends(require("workforce:read"))) -> dict[str, Any]:
+        items = ctx.teams.list_teams(context.store_id)
+        return {"store_id": context.store_id, "count": len(items), "teams": items}
+
+    @app.post("/api/teams", tags=["团队"], summary="建团队（数字员工领导 + 人工兜底，需 workforce:manage）")
+    def team_create(payload: TeamRequest,
+                    context: SecurityContext = Depends(require("workforce:manage"))) -> dict[str, Any]:
+        try:
+            record = ctx.teams.create_team(context.store_id, payload.team_key, payload.name,
+                                           leader_employee_id=payload.leader_employee_id,
+                                           human_fallback=payload.human_fallback)
+        except TeamError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="team_created", actor_type="user", actor_id=context.user_id,
+                              tenant_id=context.tenant_id, store_id=context.store_id,
+                              object_type="team", object_id=record["team_id"],
+                              after={"team_key": payload.team_key,
+                                     "human_fallback": payload.human_fallback})
+        return record
+
+    @app.post("/api/teams/{team_id}/tasks", tags=["团队"],
+              summary="派团队任务（指派或挂池等认领，需 workforce:manage）")
+    def team_task_assign(team_id: str, payload: TeamTaskRequest,
+                         context: SecurityContext = Depends(require("workforce:manage"))) -> dict[str, Any]:
+        try:
+            record = ctx.teams.assign(team_id, payload.task_id, payload.title,
+                                      assignee_ref=payload.assignee_ref,
+                                      assigned_by=context.display_name)
+        except TeamError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ctx.auth.record_audit(event_type="team_task_assigned", actor_type="user",
+                              actor_id=context.user_id, tenant_id=context.tenant_id,
+                              store_id=context.store_id, object_type="team_task",
+                              object_id=record["team_task_id"],
+                              after={"team_id": team_id, "status": record["status"],
+                                     "assignee_ref": record.get("assignee_ref")})
+        return record
 
     @app.get("/api/audit", tags=["治理"], summary="审计流水（需 audit:read）")
     def audit(limit: int = Query(100, ge=1, le=500), days: int = Query(7, ge=1, le=365),
@@ -1148,12 +1992,56 @@ def create_app(
         history = ctx.sessions.history(payload.session_id, context.user_id, limit=10)
         result = ctx.agent.reply(payload.message, context.user_id, history=history,
                                  user=context.to_user_dict())
+        # 第 6 期：知识库引用回填（向后兼容：未接入 / 无命中时为空列表，不编造）
+        result.setdefault("citations", [])
+        if context.has("knowledge:read"):
+            try:
+                knowledge = ctx.knowledge.search(context.store_id, payload.message, limit=3)
+                result["citations"] = knowledge["citations"]
+                if knowledge["citations"]:
+                    ctx.knowledge.record_citations(context.store_id, payload.message,
+                                                   knowledge["citations"])
+            except Exception:                       # noqa: BLE001 - 引用是增强项，失败不影响回答
+                result["citations"] = []
         ctx.sessions.append(payload.session_id, context.user_id, "user", payload.message)
         ctx.sessions.append(payload.session_id, context.user_id, "assistant", result["answer"], result["intent"])
         _log(f"agent:{result['intent']}", context, session_id=payload.session_id,
              input_payload={"message": payload.message, "length": len(payload.message)},
              output_payload={"requires_approval": result["requires_approval"]})
         return result
+
+    @app.post("/api/chat/stream", tags=["对话"],
+              summary="流式对话（SSE：status / delta / done / error）")
+    def chat_stream(payload: ChatRequest,
+                    context: SecurityContext = Depends(require("agent:chat"))) -> StreamingResponse:
+        try:
+            ctx.task_store.bind_session(payload.session_id, context.user_id, context.role)
+        except TaskStoreError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        history = ctx.sessions.history(payload.session_id, context.user_id, limit=10)
+        user = context.to_user_dict()
+
+        def events():
+            final_text, final_intent = "", ""
+            try:
+                for event in ctx.agent.reply_stream(payload.message, context.user_id,
+                                                    history=history, user=user):
+                    if event.get("type") == "done":
+                        final_text = str(event.get("text") or "")
+                        final_intent = str(event.get("intent") or "")
+                    yield "data: " + json.dumps(event, ensure_ascii=False, default=str) + "\n\n"
+            except Exception as exc:                      # noqa: BLE001 - 流里出错也要给前端一个事件
+                yield "data: " + json.dumps({"type": "error", "text": f"对话失败：{exc}"},
+                                            ensure_ascii=False) + "\n\n"
+            finally:
+                # 落会话历史（与 /api/chat 行为一致），放在 finally 保证降级路径也留痕
+                if final_text:
+                    ctx.sessions.append(payload.session_id, context.user_id, "user", payload.message)
+                    ctx.sessions.append(payload.session_id, context.user_id, "assistant",
+                                        final_text, final_intent)
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/history", tags=["对话"], summary="会话历史")
     def history(session_id: str = Query(..., min_length=1, max_length=80),

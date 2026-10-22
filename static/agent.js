@@ -451,6 +451,8 @@ function renderAdvice(advice) {
   return block;
 }
 
+let LAST_BUBBLE = null;      // addMessage 刚建的对话气泡，供流式增量渲染复用
+
 function addMessage(role, text, meta) {
   const details = meta || {};
   document.getElementById('welcome')?.remove();
@@ -465,6 +467,7 @@ function addMessage(role, text, meta) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = escapeText(text);
+  LAST_BUBBLE = bubble;
   if (details.advice) bubble.appendChild(renderAdvice(details.advice));
   if ((details.sources && details.sources.length) || details.approval) {
     const tags = document.createElement('div');
@@ -753,11 +756,30 @@ async function ask(message) {
   addMessage('user', clean);
   input.value = '';
   send.disabled = true;
+  let bubble = null;
+  let streamed = '';
   try {
-    const data = await postJson('/api/chat', { session_id: sessionId, message: clean });
-    addMessage('assistant', data.answer, { sources: data.sources, approval: data.requires_approval, advice: data.advice });
+    // 第 11 期：改用 SSE 流式——先出"正在思考…"，再随模型边调工具边出字。
+    addMessage('assistant', '正在思考…');
+    bubble = LAST_BUBBLE;
+    await client.streamJson('/api/chat/stream',
+      { session_id: sessionId, message: clean },
+      (event) => {
+        if (!bubble) return;
+        if (event.type === 'status') {
+          if (!streamed) bubble.textContent = event.text || '正在处理…';
+        } else if (event.type === 'delta') {
+          streamed += event.text || '';
+          bubble.textContent = streamed;
+        } else if (event.type === 'done') {
+          if (!streamed) bubble.textContent = event.text || '（没有返回内容）';
+        } else if (event.type === 'error') {
+          if (!streamed) bubble.textContent = event.text || '模型暂时不可用，请稍后再试';
+        }
+      });
   } catch (error) {
-    addMessage('assistant', '暂时无法回答：' + error.message, { error: true });
+    if (bubble && !streamed) bubble.textContent = '暂时无法回答：' + error.message;
+    else addMessage('assistant', '暂时无法回答：' + error.message, { error: true });
   } finally {
     send.disabled = false;
     input.focus();

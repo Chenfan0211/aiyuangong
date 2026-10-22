@@ -300,12 +300,25 @@ class IntegrationTests(Base):
         self.assertIn("建议先导入报表", result["answer"])
         self.assertTrue(any(src.get("type") in ("tool_call", "rule", "store_config") for src in result["sources"]))
 
-    def test_rule_intents_still_win_over_llm(self):
-        responder = ScriptedResponder([content_response("不应被调用")])
+    def test_model_takes_priority_over_rule_intents(self):
+        """第 11 期改了顺序：有模型就模型优先，关键词层降为兜底。
+
+        旧行为是"关键词优先"，导致配了 Key 也轮不到模型理解自由提问。
+        """
+        responder = ScriptedResponder([content_response("这是模型回答")])
         agent = StoreOperationsAgent.from_tools(self.config, self.tools, None, self.agent(responder))
         result = agent.reply("我今天有什么任务？", "manager-001")
+        self.assertEqual(result["intent"], "llm_tools")
+        self.assertTrue(responder.requests, "有模型时不应再由关键词层直接作答")
+        self.assertFalse(result["degraded"])
+
+    def test_rule_intents_still_work_without_llm(self):
+        """第 11 期只调整顺序，没有删掉关键词能力：无模型时照常生效。"""
+        agent = StoreOperationsAgent.from_tools(self.config, self.tools, None, None)
+        result = agent.reply("我今天有什么任务？", "manager-001")
         self.assertEqual(result["intent"], "list_tasks")
-        self.assertEqual(responder.requests, [])
+        self.assertFalse(result["llm_enabled"])
+        self.assertFalse(result["degraded"])
 
     def test_tool_agent_failure_degrades_gracefully(self):
         class Exploding:
@@ -314,8 +327,22 @@ class IntegrationTests(Base):
 
         agent = StoreOperationsAgent.from_tools(self.config, self.tools, None, Exploding())
         result = agent.reply("随便聊聊", "manager-001")
+        # 第 11 期：模型不可用时不再只回一句"模型不可用"，而是降级到兜底引导，
+        # 并用 degraded 如实标记"这次不是模型答的"。
+        self.assertTrue(result["degraded"])
         self.assertEqual(result["intent"], "llm_unavailable")
-        self.assertIn("大模型暂时不可用", result["answer"])
+        self.assertIn("没有完全确定", result["answer"])
+
+    def test_model_failure_falls_back_to_rule_answers(self):
+        """模型挂了、但问题命中关键词时，应给出真正的规则答案（而不是那句降级话术）。"""
+        class Exploding:
+            def answer(self, *args, **kwargs):
+                raise RuntimeError("模型挂了")
+
+        agent = StoreOperationsAgent.from_tools(self.config, self.tools, None, Exploding())
+        result = agent.reply("我今天有什么任务？", "manager-001")
+        self.assertEqual(result["intent"], "list_tasks")
+        self.assertTrue(result["degraded"], "降级状态必须保留，即使答案来自规则层")
 
 
 if __name__ == "__main__":

@@ -45,15 +45,36 @@ class StoreTools:
         metric_store: PlatformMetricStore,
         task_store: TaskStore,
         config_path: Optional[Path] = None,
+        ops_store: Optional[Any] = None,
+        competitor_store: Optional[Any] = None,
+        rule_store: Optional[Any] = None,
+        knowledge_store: Optional[Any] = None,
     ):
         self.config = config
         self.metric_store = metric_store
         self.task_store = task_store
+        # 第 11 期：门店侧（开台/客流、时段、库存）与竞品数据的只读入口。
+        # 用 Optional 保持既有调用方不变；未接入时相关工具会给出明确的"未接入"而不是编数。
+        self.ops_store = ops_store
+        self.competitor_store = competitor_store
+        # 第 6 期：知识库（未接入时相关工具明确说明，而不是编造）
+        self.knowledge_store = knowledge_store
         self.config_path = Path(config_path) if config_path else None
-        self.analysis = StoreAnalysis(self.config, self.metric_store, config_path=self.config_path)
+        # 第 3 期第 5 步：分析类规则版本优先读规则库（approved），读不到回退代码常量
+        self.analysis = StoreAnalysis(self.config, self.metric_store, config_path=self.config_path,
+                                      rule_store=rule_store)
         self.store_id = str(config.get("store_id") or "")
         if not self.store_id:
             raise ValueError("门店配置缺少 store_id")
+
+    def search_knowledge(self, user: dict[str, Any], query: str = "",
+                         base_id: Optional[str] = None, limit: int = 5) -> dict[str, Any]:
+        """检索门店知识库（只读，第 6 期）：命中给可回查引用，没命中就明说。"""
+        if not self._can(user, "knowledge:read"):
+            raise PermissionDenied("缺少权限：knowledge:read")
+        if self.knowledge_store is None:
+            return {"has_match": False, "reason": "未接入知识库", "count": 0, "citations": []}
+        return self.knowledge_store.search(self.store_id, query, base_id=base_id, limit=limit)
 
     # ---------------- 角色可见性 ----------------
 
@@ -136,6 +157,61 @@ class StoreTools:
         else:
             summary["financial_included"] = True
         return summary
+
+    # ---------------- 门店侧与竞品（第 11 期新增的只读工具源） ----------------
+
+    def _require_ops(self) -> Any:
+        if self.ops_store is None:
+            raise ValueError(
+                "未接入门店侧数据源，暂时无法回答开台/客流、时段与库存问题（需配置 ops_store）"
+            )
+        return self.ops_store
+
+    def _require_competitor(self) -> Any:
+        if self.competitor_store is None:
+            raise ValueError(
+                "未接入竞品数据源，暂时无法回答竞品问题（需配置 competitor_store）"
+            )
+        return self.competitor_store
+
+    def store_traffic(self, days: int = 7) -> dict[str, Any]:
+        """开台 / 客流 / 翻台率（第 1 期数据）。缺数时如实回报，不补零。"""
+        summary = self._require_ops().summary(self.store_id, days=days)
+        return {"window_days": days, "traffic": summary.traffic}
+
+    def time_slots(self, days: int = 7) -> dict[str, Any]:
+        """时段分布（各时段订单占比、客流、营收）。"""
+        summary = self._require_ops().summary(self.store_id, days=days)
+        return {"window_days": days, "time_slots": summary.time_slots}
+
+    def inventory_alerts(self, limit: int = 50) -> dict[str, Any]:
+        """未处理的库存预警（按剩余量 ÷ 安全库存分级）。"""
+        ops = self._require_ops()
+        alerts = ops.read_alerts(self.store_id, status="open",
+                                 limit=max(1, min(int(limit), 200)))
+        return {"alert_count": len(alerts), "alerts": alerts}
+
+    def competitor_matches(self) -> dict[str, Any]:
+        """竞品匹配台账：已确认 / 待确认 / 已驳回，以及尚未匹配的竞品套餐。"""
+        store = self._require_competitor()
+        matches = store.list_matches(self.store_id)
+        return {
+            "confirmed": [item for item in matches if item["status"] == "confirmed"],
+            "pending": [item for item in matches if item["status"] == "pending"],
+            "rejected": [item for item in matches if item["status"] == "rejected"],
+            "unmatched_competitor_packages": store.unmatched_competitor_packages(self.store_id),
+            "note": "只有 confirmed 的匹配参与价格与套餐对比。",
+        }
+
+    def competitor_compare(self, days: Optional[int] = None) -> dict[str, Any]:
+        """竞品四维对比：价格 / 套餐 / 活动 / 商圈变化。"""
+        store = self._require_competitor()
+        config = dict(self.config)
+        if days:
+            rules = dict(config.get("rules") or {})
+            rules["competitor_window_days"] = int(days)
+            config["rules"] = rules
+        return store.compare(self.store_id, config)
 
     def data_quality(self, days: int = 30) -> dict[str, Any]:
         return self.metric_store.data_quality(

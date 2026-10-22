@@ -98,10 +98,186 @@ TABLES: tuple[TableSpec, ...] = (
               ("tenant_id", "store_id", "checksum"), db="metrics", copy_id=True,
               timestamp_columns=("imported_at",), date_columns=("min_date", "max_date")),
 
+    # 门店侧经营数据（第 1 期）：与平台侧分库，批次账本独立为 ops_import_batches
+    TableSpec("store_traffic_daily", "store_traffic_daily",
+              ("store_id", "metric_date", "tables_opened", "table_capacity", "covers", "revenue",
+               "source_name", "imported_at"),
+              ("tenant_id", "store_id", "metric_date"), db="ops",
+              timestamp_columns=("imported_at",), date_columns=("metric_date",)),
+    TableSpec("time_slot_metrics", "time_slot_metrics",
+              ("store_id", "metric_date", "slot", "covers", "orders", "revenue",
+               "source_name", "imported_at"),
+              ("tenant_id", "store_id", "metric_date", "slot"), db="ops",
+              timestamp_columns=("imported_at",), date_columns=("metric_date",)),
+    TableSpec("inventory_items", "inventory_items",
+              ("store_id", "metric_date", "item_id", "name", "unit", "quantity", "safety_stock",
+               "source_name", "imported_at"),
+              ("tenant_id", "store_id", "metric_date", "item_id"), db="ops",
+              timestamp_columns=("imported_at",), date_columns=("metric_date",)),
+    TableSpec("inventory_alerts", "inventory_alerts",
+              ("store_id", "metric_date", "item_id", "name", "unit", "quantity", "safety_stock",
+               "level", "status", "created_at"),
+              ("tenant_id", "store_id", "metric_date", "item_id"), db="ops",
+              timestamp_columns=("created_at",), date_columns=("metric_date",)),
+    TableSpec("trade_areas", "trade_areas",
+              ("store_id", "area_id", "area_name", "area_type", "note", "source_name", "imported_at"),
+              ("tenant_id", "store_id", "area_id"), db="ops",
+              timestamp_columns=("imported_at",)),
+    TableSpec("ops_import_batches", "ops_import_batches",
+              ("id", "store_id", "source_name", "checksum", "rows_read", "rows_written",
+               "min_date", "max_date", "status", "imported_at", "dataset"),
+              ("tenant_id", "store_id", "checksum"), db="ops", copy_id=True,
+              timestamp_columns=("imported_at",), date_columns=("min_date", "max_date")),
+    # 竞品监控（第 2 期）：同样落在门店侧库
+    TableSpec("competitor_stores", "competitor_stores",
+              ("store_id", "competitor_id", "competitor_name", "area_id", "note",
+               "source_name", "imported_at"),
+              ("tenant_id", "store_id", "competitor_id"), db="ops",
+              timestamp_columns=("imported_at",)),
+    TableSpec("competitor_offers", "competitor_offers",
+              ("store_id", "competitor_id", "sample_date", "package_name", "price", "activity",
+               "activity_note", "source_method", "source_note", "sampled_by",
+               "source_name", "imported_at"),
+              ("tenant_id", "store_id", "competitor_id", "sample_date", "package_name"), db="ops",
+              timestamp_columns=("imported_at",), date_columns=("sample_date",)),
+    # 第 3 期：规则库（与配置同库，落门店侧库）
+    TableSpec("action_rules", "action_rules",
+              ("id", "rule_key", "version", "scope", "condition_json", "action_template_json",
+               "status", "approved_by", "approved_at"),
+              ("tenant_id", "rule_key", "version"), db="ops",
+              json_columns=("scope", "condition_json", "action_template_json"),
+              timestamp_columns=("approved_at",)),
+
+    # 第 3 期第 5 步：结果归因两张表从 outcome_tracker 自建收口到权威模型（类型与运行时一致）
+    TableSpec("task_feedback", "task_feedback",
+              ("store_id", "task_id", "actor_id", "decision", "reason", "created_at"),
+              ("tenant_id", "store_id", "task_id", "actor_id"), db="ops"),
+
+    TableSpec("task_outcomes", "task_outcomes",
+              ("store_id", "task_id", "window_days", "metric_key", "baseline_value", "current_value",
+               "delta", "guardrail_json", "status", "computed_at"),
+              ("tenant_id", "store_id", "task_id", "window_days", "metric_key"), db="ops"),
+
+    TableSpec("rule_outcomes", "rule_outcomes",
+              ("store_id", "rule_key", "rule_version", "window_days", "sample_size", "accepted_count",
+               "rejected_count", "avg_delta", "verdict", "suggestion_json", "computed_at"),
+              ("tenant_id", "store_id", "rule_key", "rule_version", "window_days"), db="ops"),
+
+    # 第 4 期：巡店模板（固定字段）与员工申诉
+    TableSpec("inspection_templates", "inspection_templates",
+              ("template_id", "store_id", "template_key", "name", "version", "status",
+               "created_by", "created_at"),
+              ("tenant_id", "template_id"), db="ops"),
+
+    TableSpec("inspection_items", "inspection_items",
+              ("template_id", "item_key", "title", "evidence_required", "required",
+               "assignee_role", "threshold_json", "sort_order"),
+              ("tenant_id", "template_id", "item_key"), db="ops"),
+
+    TableSpec("appeals", "appeals",
+              ("appeal_id", "store_id", "task_id", "employee_id", "reason", "status",
+               "decision_note", "decided_by", "created_at", "decided_at"),
+              ("tenant_id", "appeal_id"), db="ops"),
+
+    # 第 5 期：能力注册表（注册快照 + 角色/门店绑定）
+    TableSpec("capabilities", "capabilities",
+              ("capability_id", "name", "permission", "description", "parameters_json",
+               "scope_json", "source", "status", "updated_at"),
+              ("tenant_id", "capability_id"), db="ops"),
+
+    TableSpec("capability_bindings", "capability_bindings",
+              ("binding_id", "capability_id", "store_id", "role", "enabled", "updated_at"),
+              ("tenant_id", "binding_id"), db="ops"),
+
+    # 第 6 期：知识库五张表
+    TableSpec("knowledge_bases", "knowledge_bases",
+              ("base_id", "store_id", "base_key", "name", "description", "status", "created_at"),
+              ("tenant_id", "base_id"), db="ops"),
+    TableSpec("knowledge_documents", "knowledge_documents",
+              ("document_id", "base_id", "store_id", "title", "source_name", "doc_type",
+               "content_hash", "char_count", "chunk_count", "created_at"),
+              ("tenant_id", "document_id"), db="ops"),
+    TableSpec("knowledge_chunks", "knowledge_chunks",
+              ("chunk_id", "document_id", "base_id", "store_id", "heading_path", "text",
+               "char_count", "order_index"),
+              ("tenant_id", "chunk_id"), db="ops"),
+    TableSpec("knowledge_citations", "knowledge_citations",
+              ("citation_id", "store_id", "query", "document_id", "chunk_id", "score", "created_at"),
+              ("tenant_id", "citation_id"), db="ops"),
+    TableSpec("knowledge_ingest_jobs", "knowledge_ingest_jobs",
+              ("job_id", "store_id", "base_id", "document_id", "status", "chunk_count", "error",
+               "created_at", "finished_at"),
+              ("tenant_id", "job_id"), db="ops"),
+
+    # 第 7 期：SOP 定义/版本与运行/步骤
+    TableSpec("sops", "sops",
+              ("sop_id", "store_id", "sop_key", "name", "version", "status", "max_hours",
+               "created_by", "created_at"),
+              ("tenant_id", "sop_id"), db="ops"),
+    TableSpec("sop_versions", "sop_versions",
+              ("version_id", "sop_id", "version", "nodes_json", "edges_json", "start_node", "created_at"),
+              ("tenant_id", "version_id"), db="ops"),
+    TableSpec("sop_runs", "sop_runs",
+              ("run_id", "sop_id", "store_id", "sop_version", "status", "current_node",
+               "context_json", "started_at", "updated_at", "finished_at", "max_hours", "error"),
+              ("tenant_id", "run_id"), db="ops"),
+    TableSpec("sop_step_runs", "sop_step_runs",
+              ("step_run_id", "run_id", "node_id", "node_type", "seq", "status", "task_id",
+               "approval_id", "payload_json", "entered_at", "finished_at", "error"),
+              ("tenant_id", "step_run_id"), db="ops"),
+
+    # 第 8 期：工具模板/实例与凭据（凭据只存哈希与掩码）
+    TableSpec("tool_templates", "tool_templates",
+              ("template_id", "store_id", "template_key", "name", "entrypoint", "manifest_json",
+               "network_policy", "network_required", "timeout_seconds", "limits_json", "status",
+               "created_by", "created_at"),
+              ("tenant_id", "template_id"), db="ops"),
+    TableSpec("tool_instances", "tool_instances",
+              ("instance_id", "store_id", "template_id", "instance_key", "credential_id",
+               "network_policy", "status", "created_by", "created_at"),
+              ("tenant_id", "instance_id"), db="ops"),
+    TableSpec("tool_credentials", "tool_credentials",
+              ("credential_id", "store_id", "instance_id", "secret_hash", "secret_mask", "created_at"),
+              ("tenant_id", "credential_id"), db="ops"),
+
+    # 第 9 期：长期记忆与进化提案
+    TableSpec("memory_records", "memory_records",
+              ("memory_id", "store_id", "user_id", "role", "kind", "value", "content_hash", "hits",
+               "source", "created_at", "updated_at"),
+              ("tenant_id", "memory_id"), db="ops"),
+    TableSpec("evolution_proposals", "evolution_proposals",
+              ("proposal_id", "store_id", "proposal_type", "title", "payload_json", "evidence_json",
+               "status", "decided_by", "decision_note", "created_at", "decided_at"),
+              ("tenant_id", "proposal_id"), db="ops"),
+
+    # 第 10 期：数字员工与团队
+    TableSpec("digital_employees", "digital_employees",
+              ("employee_id", "store_id", "employee_key", "name", "role_profile",
+               "capabilities_json", "status", "created_by", "created_at"),
+              ("tenant_id", "employee_id"), db="ops"),
+    TableSpec("teams", "teams",
+              ("team_id", "store_id", "team_key", "name", "leader_employee_id", "human_fallback",
+               "status", "created_at"),
+              ("tenant_id", "team_id"), db="ops"),
+    TableSpec("team_members", "team_members",
+              ("team_id", "member_id", "member_type", "member_ref", "member_role", "joined_at"),
+              ("tenant_id", "team_id", "member_id"), db="ops"),
+    TableSpec("team_tasks", "team_tasks",
+              ("team_task_id", "team_id", "store_id", "task_id", "title", "assignee_ref", "status",
+               "assigned_by", "created_at", "updated_at", "claimed_at"),
+              ("tenant_id", "team_task_id"), db="ops"),
+
+    TableSpec("competitor_matches", "competitor_matches",
+              ("store_id", "platform", "package_id", "competitor_id", "competitor_package_name",
+               "status", "confirmed_by", "confirmed_at", "note", "created_at", "updated_at"),
+              ("tenant_id", "store_id", "platform", "package_id", "competitor_id",
+               "competitor_package_name"), db="ops",
+              timestamp_columns=("confirmed_at", "created_at", "updated_at")),
+
     TableSpec("action_tasks", "action_tasks",
               # 列名与运行时一致（批次 8b 起 schema.sql 不再重命名 JSON 列），jsonb 类型由 PG 侧保证
               ("task_id", "store_id", "source_fingerprint", "category", "title", "assignee_id", "priority",
-               "status", "target_json", "reason", "evidence_required_json", "approval_required",
+               "status", "target_json", "reason", "evidence_required_json", "approval_required", "rule_key", "rule_version",
                "due_at", "created_at", "updated_at"),
               ("task_id",),
               json_columns=("target_json", "evidence_required_json"),
@@ -299,6 +475,692 @@ def load_migrations() -> tuple[Migration, ...]:
                 "create index if not exists idx_channel_bindings_user on channel_bindings (tenant_id, store_id, user_id, status)",
             ),
             requires_tables=("channel_bindings",),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=4,
+            name="competitor_monitoring",
+            statements=(
+                # 第 2 期：竞品监控三张表 + 放宽 ops_import_batches.dataset 的枚举。
+                # 表 DDL 与 schema.sql A 段保持一致：schema.sql 供新库与运行时 apply_schema，
+                # 这里供既有库在 migrate --apply 时自洽（与 v3 的 channel_bindings 同一范式）。
+                """create table if not exists competitor_stores (
+  tenant_id text not null default '',
+  store_id text not null,
+  competitor_id text not null,
+  competitor_name text not null,
+  area_id text not null,
+  note text,
+  source_name text not null,
+  imported_at timestamptz not null,
+  primary key (tenant_id, store_id, competitor_id)
+)""",
+                "create index if not exists idx_competitor_stores_area "
+                "on competitor_stores (tenant_id, store_id, area_id)",
+                """create table if not exists competitor_offers (
+  tenant_id text not null default '',
+  store_id text not null,
+  competitor_id text not null,
+  sample_date date not null,
+  package_name text not null,
+  price numeric(12, 2) not null,
+  activity text,
+  activity_note text,
+  source_method text,
+  source_note text,
+  sampled_by text,
+  source_name text not null,
+  imported_at timestamptz not null,
+  primary key (tenant_id, store_id, competitor_id, sample_date, package_name)
+)""",
+                "create index if not exists idx_competitor_offers_window "
+                "on competitor_offers (tenant_id, store_id, sample_date)",
+                """create table if not exists competitor_matches (
+  tenant_id text not null default '',
+  store_id text not null,
+  platform text not null check (platform in ('meituan', 'douyin')),
+  package_id text not null,
+  competitor_id text not null,
+  competitor_package_name text not null,
+  status text not null default 'confirmed' check (status in ('pending', 'confirmed', 'rejected')),
+  confirmed_by text,
+  confirmed_at timestamptz,
+  note text,
+  created_at timestamptz not null,
+  updated_at timestamptz not null,
+  unique (tenant_id, store_id, platform, package_id, competitor_id, competitor_package_name)
+)""",
+                "create index if not exists idx_competitor_matches_status "
+                "on competitor_matches (tenant_id, store_id, status)",
+                # 租户隔离策略也随迁移一起落地：只建表不开 RLS 会在"迁移完但应用未启动"的窗口里留下缺口。
+                # 三条策略都可重复执行（enable 幂等 + drop policy if exists + create policy）。
+                "alter table competitor_stores enable row level security",
+                "drop policy if exists p_competitor_stores_tenant on competitor_stores",
+                "create policy p_competitor_stores_tenant on competitor_stores "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table competitor_offers enable row level security",
+                "drop policy if exists p_competitor_offers_tenant on competitor_offers",
+                "create policy p_competitor_offers_tenant on competitor_offers "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table competitor_matches enable row level security",
+                "drop policy if exists p_competitor_matches_tenant on competitor_matches",
+                "create policy p_competitor_matches_tenant on competitor_matches "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                # 放宽 dataset 枚举。drop 两个名字是为了同时覆盖两种情况：
+                # 迁移前由 PostgreSQL 自动命名的 ops_import_batches_dataset_check，
+                # 以及 schema.sql 已改用显式名建出来的 ck_ops_import_batches_dataset。
+                "alter table ops_import_batches drop constraint if exists ops_import_batches_dataset_check",
+                "alter table ops_import_batches drop constraint if exists ck_ops_import_batches_dataset",
+                "alter table ops_import_batches add constraint ck_ops_import_batches_dataset "
+                "check (dataset in ('ops_traffic', 'ops_timeslot', 'ops_inventory', 'ops_trade_area', "
+                "'competitor_store', 'competitor_offer'))",
+            ),
+            requires_tables=("ops_import_batches", "competitor_stores", "competitor_offers",
+                             "competitor_matches"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=5,
+            name="action_rules_landing",
+            statements=(
+                # 第 3 期：把原"B. 规划中"的 action_rules 正式转正（含租户隔离策略）。
+                # 与 v3/v4 同一范式：schema.sql A 段供新库与运行时 apply_schema，
+                # 这里供既有库在 migrate --apply 时自洽。
+                """create table if not exists action_rules (
+  tenant_id text not null default '',
+  id uuid not null,
+  rule_key text not null,
+  version integer not null,
+  scope jsonb not null,
+  condition_json jsonb not null,
+  action_template_json jsonb not null,
+  status text not null check (status in ('draft','approved','paused','retired')),
+  approved_by text,
+  approved_at timestamptz,
+  primary key (tenant_id, rule_key, version)
+)""",
+                "create index if not exists idx_action_rules_status "
+                "on action_rules (tenant_id, rule_key, status)",
+                "alter table action_rules enable row level security",
+                "drop policy if exists p_action_rules_tenant on action_rules",
+                "create policy p_action_rules_tenant on action_rules "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("action_rules",),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=6,
+            name="task_outcome_tables_landing",
+            statements=(
+                # 第 3 期第 5 步：把 outcome_tracker 自建的两张表收口进权威模型。
+                # 列类型与运行时 DDL 保持一致（text/integer/real），既有库可直接认领。
+                """create table if not exists task_feedback (
+  tenant_id text not null default '',
+  store_id text not null,
+  task_id text not null,
+  actor_id text not null,
+  decision text not null check (decision in ('accepted','rejected','false_positive')),
+  reason text not null default '',
+  created_at text not null,
+  primary key (tenant_id, store_id, task_id, actor_id)
+)""",
+                "create index if not exists idx_task_feedback_store_decision "
+                "on task_feedback (store_id, decision, created_at)",
+                """create table if not exists task_outcomes (
+  tenant_id text not null default '',
+  store_id text not null,
+  task_id text not null,
+  window_days integer not null,
+  metric_key text not null,
+  baseline_value real,
+  current_value real,
+  delta real,
+  guardrail_json text not null default '{}',
+  status text not null check (status in ('computed','no_data','pending')),
+  computed_at text not null,
+  primary key (tenant_id, store_id, task_id, window_days, metric_key)
+)""",
+                "create index if not exists idx_task_outcomes_store_status "
+                "on task_outcomes (store_id, status, window_days)",
+                "alter table task_feedback enable row level security",
+                "drop policy if exists p_task_feedback_tenant on task_feedback",
+                "create policy p_task_feedback_tenant on task_feedback "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table task_outcomes enable row level security",
+                "drop policy if exists p_task_outcomes_tenant on task_outcomes",
+                "create policy p_task_outcomes_tenant on task_outcomes "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("task_feedback", "task_outcomes"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=7,
+            name="action_tasks_rule_source",
+            statements=(
+                # 第 3 期第 6 步：任务需能追溯产生它的规则与版本（历史任务为空串）。
+                "alter table action_tasks add column if not exists rule_key text not null default ''",
+                "alter table action_tasks add column if not exists rule_version text not null default ''",
+            ),
+            requires_tables=("action_tasks",),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=8,
+            name="rule_outcomes_landing",
+            statements=(
+                # 第 3 期第 6 步：规则效果归因表（提案只写这里，不回写 action_rules）。
+                """create table if not exists rule_outcomes (
+  tenant_id text not null default '',
+  store_id text not null,
+  rule_key text not null,
+  rule_version text not null,
+  window_days integer not null,
+  sample_size integer not null,
+  accepted_count integer not null,
+  rejected_count integer not null,
+  avg_delta real,
+  verdict text not null check (verdict in ('keep','raise_threshold','lower_threshold','insufficient_data')),
+  suggestion_json text not null default '{}',
+  computed_at text not null,
+  primary key (tenant_id, store_id, rule_key, rule_version, window_days)
+)""",
+                "create index if not exists idx_rule_outcomes_store_rule "
+                "on rule_outcomes (store_id, rule_key, window_days)",
+                "alter table rule_outcomes enable row level security",
+                "drop policy if exists p_rule_outcomes_tenant on rule_outcomes",
+                "create policy p_rule_outcomes_tenant on rule_outcomes "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("rule_outcomes",),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=9,
+            name="inspection_and_appeals_landing",
+            statements=(
+                # 第 4 期：巡店模板/检查项与员工申诉三张表（列类型与运行时 DDL 一致）。
+                """create table if not exists inspection_templates (
+  tenant_id text not null default '',
+  template_id text not null,
+  store_id text not null,
+  template_key text not null,
+  name text not null,
+  version integer not null,
+  status text not null check (status in ('draft','active','retired')),
+  created_by text not null default '',
+  created_at text not null,
+  primary key (tenant_id, template_id),
+  unique (tenant_id, store_id, template_key, version)
+)""",
+                "create index if not exists idx_inspection_templates_scope "
+                "on inspection_templates (tenant_id, store_id, template_key, status)",
+                """create table if not exists inspection_items (
+  tenant_id text not null default '',
+  template_id text not null,
+  item_key text not null,
+  title text not null,
+  evidence_required text not null default '[]',
+  required integer not null default 1,
+  assignee_role text not null default 'store_manager',
+  threshold_json text not null default '{}',
+  sort_order integer not null default 0,
+  primary key (tenant_id, template_id, item_key)
+)""",
+                """create table if not exists appeals (
+  tenant_id text not null default '',
+  appeal_id text not null,
+  store_id text not null,
+  task_id text not null,
+  employee_id text not null,
+  reason text not null,
+  status text not null check (status in ('pending','accepted','rejected')),
+  decision_note text not null default '',
+  decided_by text,
+  created_at text not null,
+  decided_at text,
+  primary key (tenant_id, appeal_id)
+)""",
+                "create index if not exists idx_appeals_store_task "
+                "on appeals (tenant_id, store_id, task_id, status)",
+                "alter table inspection_templates enable row level security",
+                "drop policy if exists p_inspection_templates_tenant on inspection_templates",
+                "create policy p_inspection_templates_tenant on inspection_templates "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table inspection_items enable row level security",
+                "drop policy if exists p_inspection_items_tenant on inspection_items",
+                "create policy p_inspection_items_tenant on inspection_items "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table appeals enable row level security",
+                "drop policy if exists p_appeals_tenant on appeals",
+                "create policy p_appeals_tenant on appeals "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("inspection_templates", "inspection_items", "appeals"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=10,
+            name="capability_registry_landing",
+            statements=(
+                # 第 5 期：能力注册快照与绑定（主数据，永久保留）。
+                """create table if not exists capabilities (
+  tenant_id text not null default '',
+  capability_id text not null,
+  name text not null,
+  permission text not null,
+  description text not null default '',
+  parameters_json text not null default '{}',
+  scope_json text not null default '{}',
+  source text not null default 'agent_tools',
+  status text not null default 'active' check (status in ('active','disabled')),
+  updated_at text not null,
+  primary key (tenant_id, capability_id)
+)""",
+                """create table if not exists capability_bindings (
+  tenant_id text not null default '',
+  binding_id text not null,
+  capability_id text not null,
+  store_id text not null default '',
+  role text not null,
+  enabled integer not null default 1,
+  updated_at text not null,
+  primary key (tenant_id, binding_id),
+  unique (tenant_id, capability_id, store_id, role)
+)""",
+                "alter table capabilities enable row level security",
+                "drop policy if exists p_capabilities_tenant on capabilities",
+                "create policy p_capabilities_tenant on capabilities "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table capability_bindings enable row level security",
+                "drop policy if exists p_capability_bindings_tenant on capability_bindings",
+                "create policy p_capability_bindings_tenant on capability_bindings "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("capabilities", "capability_bindings"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=11,
+            name="knowledge_base_landing",
+            statements=(
+                # 第 6 期：知识库五张表（结构感知检索 + 可回查引用）。
+                """create table if not exists knowledge_bases (
+  tenant_id text not null default '',
+  base_id text not null,
+  store_id text not null,
+  base_key text not null,
+  name text not null,
+  description text not null default '',
+  status text not null default 'active' check (status in ('active','archived')),
+  created_at text not null,
+  primary key (tenant_id, base_id),
+  unique (tenant_id, store_id, base_key)
+)""",
+                """create table if not exists knowledge_documents (
+  tenant_id text not null default '',
+  document_id text not null,
+  base_id text not null,
+  store_id text not null,
+  title text not null,
+  source_name text not null default '',
+  doc_type text not null default 'text' check (doc_type in ('text','markdown')),
+  content_hash text not null,
+  char_count integer not null default 0,
+  chunk_count integer not null default 0,
+  created_at text not null,
+  primary key (tenant_id, document_id),
+  unique (tenant_id, base_id, content_hash)
+)""",
+                """create table if not exists knowledge_chunks (
+  tenant_id text not null default '',
+  chunk_id text not null,
+  document_id text not null,
+  base_id text not null,
+  store_id text not null,
+  heading_path text not null default '[]',
+  text text not null,
+  char_count integer not null default 0,
+  order_index integer not null default 0,
+  primary key (tenant_id, chunk_id)
+)""",
+                "create index if not exists idx_knowledge_chunks_base "
+                "on knowledge_chunks (tenant_id, base_id, order_index)",
+                """create table if not exists knowledge_citations (
+  tenant_id text not null default '',
+  citation_id text not null,
+  store_id text not null,
+  query text not null,
+  document_id text not null,
+  chunk_id text not null,
+  score real not null default 0,
+  created_at text not null,
+  primary key (tenant_id, citation_id)
+)""",
+                """create table if not exists knowledge_ingest_jobs (
+  tenant_id text not null default '',
+  job_id text not null,
+  store_id text not null,
+  base_id text not null,
+  document_id text,
+  status text not null check (status in ('started','success','failed')),
+  chunk_count integer not null default 0,
+  error text,
+  created_at text not null,
+  finished_at text,
+  primary key (tenant_id, job_id)
+)""",
+                "alter table knowledge_bases enable row level security",
+                "drop policy if exists p_knowledge_bases_tenant on knowledge_bases",
+                "create policy p_knowledge_bases_tenant on knowledge_bases "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table knowledge_documents enable row level security",
+                "drop policy if exists p_knowledge_documents_tenant on knowledge_documents",
+                "create policy p_knowledge_documents_tenant on knowledge_documents "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table knowledge_chunks enable row level security",
+                "drop policy if exists p_knowledge_chunks_tenant on knowledge_chunks",
+                "create policy p_knowledge_chunks_tenant on knowledge_chunks "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table knowledge_citations enable row level security",
+                "drop policy if exists p_knowledge_citations_tenant on knowledge_citations",
+                "create policy p_knowledge_citations_tenant on knowledge_citations "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table knowledge_ingest_jobs enable row level security",
+                "drop policy if exists p_knowledge_ingest_jobs_tenant on knowledge_ingest_jobs",
+                "create policy p_knowledge_ingest_jobs_tenant on knowledge_ingest_jobs "
+                "using (tenant_id = current_setting('app.tenant_id', true)) "
+                "with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("knowledge_bases", "knowledge_documents", "knowledge_chunks",
+                             "knowledge_citations", "knowledge_ingest_jobs"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=12,
+            name="sop_engine_landing",
+            statements=(
+                # 第 7 期：SOP 四张表（4 类节点 / 8 态状态机 / 断点续跑 / 版本）。
+                """create table if not exists sops (
+  tenant_id text not null default '',
+  sop_id text not null,
+  store_id text not null,
+  sop_key text not null,
+  name text not null,
+  version integer not null,
+  status text not null check (status in ('draft','active','retired')),
+  max_hours real not null default 24,
+  created_by text not null default '',
+  created_at text not null,
+  primary key (tenant_id, sop_id),
+  unique (tenant_id, store_id, sop_key, version)
+)""",
+                """create table if not exists sop_versions (
+  tenant_id text not null default '',
+  version_id text not null,
+  sop_id text not null,
+  version integer not null,
+  nodes_json text not null,
+  edges_json text not null,
+  start_node text not null,
+  created_at text not null,
+  primary key (tenant_id, version_id),
+  unique (tenant_id, sop_id, version)
+)""",
+                """create table if not exists sop_runs (
+  tenant_id text not null default '',
+  run_id text not null,
+  sop_id text not null,
+  store_id text not null,
+  sop_version integer not null,
+  status text not null check (status in
+    ('pending','running','waiting_human','waiting_approval','completed','failed','cancelled','timed_out')),
+  current_node text,
+  context_json text not null default '{}',
+  started_at text not null,
+  updated_at text not null,
+  finished_at text,
+  max_hours real not null default 24,
+  error text,
+  primary key (tenant_id, run_id)
+)""",
+                """create table if not exists sop_step_runs (
+  tenant_id text not null default '',
+  step_run_id text not null,
+  run_id text not null,
+  node_id text not null,
+  node_type text not null,
+  seq integer not null default 0,
+  status text not null check (status in ('running','waiting','completed','timeout','failed')),
+  task_id text,
+  approval_id text,
+  payload_json text not null default '{}',
+  entered_at text not null,
+  finished_at text,
+  error text,
+  primary key (tenant_id, step_run_id)
+)""",
+                "create index if not exists idx_sop_versions_sop "
+                "on sop_versions (tenant_id, sop_id, version)",
+                "create index if not exists idx_sop_step_runs_run "
+                "on sop_step_runs (tenant_id, run_id, seq)",
+                "alter table sops enable row level security",
+                "drop policy if exists p_sops_tenant on sops",
+                "create policy p_sops_tenant on sops using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table sop_versions enable row level security",
+                "drop policy if exists p_sop_versions_tenant on sop_versions",
+                "create policy p_sop_versions_tenant on sop_versions using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table sop_runs enable row level security",
+                "drop policy if exists p_sop_runs_tenant on sop_runs",
+                "create policy p_sop_runs_tenant on sop_runs using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table sop_step_runs enable row level security",
+                "drop policy if exists p_sop_step_runs_tenant on sop_step_runs",
+                "create policy p_sop_step_runs_tenant on sop_step_runs using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("sops", "sop_versions", "sop_runs", "sop_step_runs"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=13,
+            name="tool_registry_and_sandbox_landing",
+            statements=(
+                # 第 8 期：工具模板/实例/凭据三张表（凭据只存哈希与掩码）。
+                """create table if not exists tool_templates (
+  tenant_id text not null default '',
+  template_id text not null,
+  store_id text not null,
+  template_key text not null,
+  name text not null,
+  entrypoint text not null,
+  manifest_json text not null,
+  network_policy text not null default 'deny',
+  network_required integer not null default 0,
+  timeout_seconds real not null default 30,
+  limits_json text not null default '{}',
+  status text not null default 'active',
+  created_by text not null default '',
+  created_at text not null,
+  primary key (tenant_id, template_id),
+  unique (tenant_id, store_id, template_key)
+)""",
+                """create table if not exists tool_instances (
+  tenant_id text not null default '',
+  instance_id text not null,
+  store_id text not null,
+  template_id text not null,
+  instance_key text not null,
+  credential_id text,
+  network_policy text not null default '',
+  status text not null default 'active' check (status in ('active','disabled')),
+  created_by text not null default '',
+  created_at text not null,
+  primary key (tenant_id, instance_id),
+  unique (tenant_id, store_id, instance_key)
+)""",
+                """create table if not exists tool_credentials (
+  tenant_id text not null default '',
+  credential_id text not null,
+  store_id text not null,
+  instance_id text not null,
+  secret_hash text not null,
+  secret_mask text not null default '',
+  created_at text not null,
+  primary key (tenant_id, credential_id)
+)""",
+                "alter table tool_templates enable row level security",
+                "drop policy if exists p_tool_templates_tenant on tool_templates",
+                "create policy p_tool_templates_tenant on tool_templates using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table tool_instances enable row level security",
+                "drop policy if exists p_tool_instances_tenant on tool_instances",
+                "create policy p_tool_instances_tenant on tool_instances using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table tool_credentials enable row level security",
+                "drop policy if exists p_tool_credentials_tenant on tool_credentials",
+                "create policy p_tool_credentials_tenant on tool_credentials using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("tool_templates", "tool_instances", "tool_credentials"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=14,
+            name="memory_and_evolution_landing",
+            statements=(
+                # 第 9 期：三类记忆与进化提案（提案只记录，不改运行行为）。
+                """create table if not exists memory_records (
+  tenant_id text not null default '',
+  memory_id text not null,
+  store_id text not null,
+  user_id text not null default '',
+  role text not null default '',
+  kind text not null check (kind in ('profile','preference','fact')),
+  value text not null,
+  content_hash text not null,
+  hits integer not null default 1,
+  source text not null default '',
+  created_at text not null,
+  updated_at text not null,
+  primary key (tenant_id, memory_id),
+  unique (tenant_id, store_id, user_id, kind, content_hash)
+)""",
+                """create table if not exists evolution_proposals (
+  tenant_id text not null default '',
+  proposal_id text not null,
+  store_id text not null,
+  proposal_type text not null check (proposal_type in ('sop_step','memory_consolidation','reflection')),
+  title text not null,
+  payload_json text not null default '{}',
+  evidence_json text not null default '[]',
+  status text not null default 'pending' check (status in ('pending','approved','rejected')),
+  decided_by text,
+  decision_note text not null default '',
+  created_at text not null,
+  decided_at text,
+  primary key (tenant_id, proposal_id)
+)""",
+                "create index if not exists idx_memory_scope "
+                "on memory_records (tenant_id, store_id, user_id, kind)",
+                "create index if not exists idx_evolution_scope "
+                "on evolution_proposals (tenant_id, store_id, status)",
+                "alter table memory_records enable row level security",
+                "drop policy if exists p_memory_records_tenant on memory_records",
+                "create policy p_memory_records_tenant on memory_records using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table evolution_proposals enable row level security",
+                "drop policy if exists p_evolution_proposals_tenant on evolution_proposals",
+                "create policy p_evolution_proposals_tenant on evolution_proposals using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("memory_records", "evolution_proposals"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=15,
+            name="workforce_and_teams_landing",
+            statements=(
+                # 第 10 期：数字员工与团队四张表。
+                """create table if not exists digital_employees (
+  tenant_id text not null default '',
+  employee_id text not null,
+  store_id text not null,
+  employee_key text not null,
+  name text not null,
+  role_profile text not null default '',
+  capabilities_json text not null default '[]',
+  status text not null default 'active' check (status in ('active','paused','retired')),
+  created_by text not null default '',
+  created_at text not null,
+  primary key (tenant_id, employee_id),
+  unique (tenant_id, store_id, employee_key)
+)""",
+                """create table if not exists teams (
+  tenant_id text not null default '',
+  team_id text not null,
+  store_id text not null,
+  team_key text not null,
+  name text not null,
+  leader_employee_id text,
+  human_fallback text not null default '',
+  status text not null default 'active' check (status in ('active','archived')),
+  created_at text not null,
+  primary key (tenant_id, team_id),
+  unique (tenant_id, store_id, team_key)
+)""",
+                """create table if not exists team_members (
+  tenant_id text not null default '',
+  team_id text not null,
+  member_id text not null,
+  member_type text not null check (member_type in ('digital_employee','human')),
+  member_ref text not null,
+  member_role text not null default 'member',
+  joined_at text not null,
+  primary key (tenant_id, team_id, member_id)
+)""",
+                """create table if not exists team_tasks (
+  tenant_id text not null default '',
+  team_task_id text not null,
+  team_id text not null,
+  store_id text not null,
+  task_id text not null,
+  title text not null,
+  assignee_ref text,
+  status text not null default 'offered' check (status in ('offered','claimed','completed','canceled')),
+  assigned_by text not null default '',
+  created_at text not null,
+  updated_at text not null,
+  claimed_at text,
+  primary key (tenant_id, team_task_id),
+  unique (tenant_id, team_id, task_id)
+)""",
+                "create index if not exists idx_team_tasks_scope "
+                "on team_tasks (tenant_id, team_id, status)",
+                "alter table digital_employees enable row level security",
+                "drop policy if exists p_digital_employees_tenant on digital_employees",
+                "create policy p_digital_employees_tenant on digital_employees using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table teams enable row level security",
+                "drop policy if exists p_teams_tenant on teams",
+                "create policy p_teams_tenant on teams using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table team_members enable row level security",
+                "drop policy if exists p_team_members_tenant on team_members",
+                "create policy p_team_members_tenant on team_members using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+                "alter table team_tasks enable row level security",
+                "drop policy if exists p_team_tasks_tenant on team_tasks",
+                "create policy p_team_tasks_tenant on team_tasks using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
+            ),
+            requires_tables=("digital_employees", "teams", "team_members", "team_tasks"),
             checksum_tracked=True,
         ),
     )

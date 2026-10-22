@@ -1,0 +1,3 @@
+date,store_id,item_id,name,unit,quantity,safety_stock
+2026-10-19,WH-LION-001,M001,一次性手套,箱,2,10
+2026-10-19,WH-LION-001,M002,打包盒,箱,30,20

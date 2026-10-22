@@ -36,6 +36,13 @@ CORE_TABLES = {
     "metric_import_batches", "action_tasks", "task_evidence", "task_events", "users",
     "memberships", "channel_bindings", "auth_sessions", "login_attempts", "audit_events", "agent_sessions",
     "agent_messages", "approvals", "agent_tool_runs", "notifications",
+    # 第 1 期：门店侧经营数据
+    "store_traffic_daily", "time_slot_metrics", "inventory_items", "inventory_alerts",
+    "trade_areas", "ops_import_batches",
+    # 第 2 期：竞品监控
+    "competitor_stores", "competitor_offers", "competitor_matches",
+    # 第 3 期：规则库
+    "action_rules",
     "schema_migrations", "schema_migration_lock",
 }
 # 迁移账本表：属于迁移基础设施，不算业务结构
@@ -180,6 +187,86 @@ class MigrationVersioningTests(unittest.TestCase):
         self.assertEqual(self.pg_scalar("select count(*) from schema_migrations"), len(pg_sync.MIGRATIONS))
         self.assertEqual(self.applied_at(1), stamp, "重复 apply 不得刷新已应用版本")
         self.assertEqual([item["version"] for item in first["applied"]], [item.version for item in pg_sync.MIGRATIONS])
+
+    # ---------------- 第 2 期：竞品监控迁移（v4） ----------------
+
+    COMPETITOR_TABLES = ("competitor_stores", "competitor_offers", "competitor_matches")
+    OPS_BATCH_INSERT = (
+        "insert into ops_import_batches "
+        "(store_id, source_name, checksum, rows_read, rows_written, min_date, max_date, status, "
+        " imported_at, dataset) "
+        "values ('WH-LION-001', 'x.csv', %s, 1, 1, '2026-10-01', '2026-10-01', 'success', now(), %s)"
+    )
+
+    def check_constraint_name(self, table, column):
+        return self.pg_scalar(
+            """select con.conname from pg_constraint con
+               join pg_class rel on rel.oid = con.conrelid
+               join pg_attribute att on att.attrelid = rel.oid and att.attnum = any(con.conkey)
+               where rel.relname = %s and att.attname = %s and con.contype = 'c'""",
+            (table, column))
+
+    def test_v4_creates_competitor_tables_with_rls_and_verifies(self):
+        """v4 必须自洽：既有库执行 migrate --apply 后三张表已存在，且租户隔离策略一并落地。"""
+        result = self.run_migrate("--apply")
+        self.assertEqual(result.returncode, 0, result.stdout[-1500:] + result.stderr[-800:])
+        tables = self.pg_tables()
+        self.assertTrue(set(self.COMPETITOR_TABLES) <= tables, set(self.COMPETITOR_TABLES) - tables)
+        for table in self.COMPETITOR_TABLES:
+            self.assertTrue(
+                self.pg_scalar("select relrowsecurity from pg_class where relname = %s", (table,)),
+                f"{table} 未开启 RLS",
+            )
+        # 新库侧也必须是同一个显式约束名（与"既有库迁移后"收敛）
+        self.assertEqual(self.check_constraint_name("ops_import_batches", "dataset"),
+                         "ck_ops_import_batches_dataset")
+        verify = json.loads(self.run_migrate("--verify").stdout)
+        self.assertTrue(verify["ok"], verify)
+        self.assertEqual(verify["missing_tables"], [])
+        self.assertEqual(verify["expected_version"], pg_sync.MIGRATIONS[-1].version)
+        self.assertEqual([item["version"] for item in verify["applied"]],
+                         [item.version for item in pg_sync.MIGRATIONS])
+
+    def test_v4_widens_legacy_dataset_constraint_and_converges_name(self):
+        """升级路径：v4 之前是自动命名的旧枚举，v4 之后必须收敛到显式名，并能写入两类新数据集。"""
+        self.run_migrate("--apply")
+        with psycopg.connect(self.dsn, autocommit=True) as conn, conn.cursor() as cur:
+            # 回退成 v4 之前的真实状态：PostgreSQL 自动命名 + 只含第 1 期四类
+            cur.execute("alter table ops_import_batches drop constraint ck_ops_import_batches_dataset")
+            cur.execute(
+                "alter table ops_import_batches add constraint ops_import_batches_dataset_check "
+                "check (dataset in ('ops_traffic', 'ops_timeslot', 'ops_inventory', 'ops_trade_area'))"
+            )
+            cur.execute("delete from schema_migrations where version = 4")
+            self.assertEqual(self.check_constraint_name("ops_import_batches", "dataset"),
+                             "ops_import_batches_dataset_check")
+            with self.assertRaises(psycopg.errors.CheckViolation):
+                cur.execute(self.OPS_BATCH_INSERT, ("legacy-check", "competitor_store"))
+
+        again = json.loads(self.run_migrate("--apply").stdout)
+        self.assertTrue(again["ok"])
+        self.assertEqual([item["version"] for item in again["applied_now"]], [4])
+        self.assertEqual(self.check_constraint_name("ops_import_batches", "dataset"),
+                         "ck_ops_import_batches_dataset")
+        with psycopg.connect(self.dsn, autocommit=True) as conn, conn.cursor() as cur:
+            for index, dataset in enumerate(("competitor_store", "competitor_offer")):
+                cur.execute(self.OPS_BATCH_INSERT, (f"after-v4-{index}", dataset))
+        # 不用 LIKE：psycopg 会把 % 当占位符，用显式集合更直白也更稳
+        self.assertEqual(self.pg_scalar(
+            "select count(*) from ops_import_batches "
+            "where dataset in ('competitor_store', 'competitor_offer')"), 2)
+        self.assertTrue(json.loads(self.run_migrate("--verify").stdout)["ok"])
+
+    def test_v4_rerun_is_idempotent(self):
+        """v4 里的 drop + add 约束必须可重复执行。"""
+        self.run_migrate("--apply")
+        with psycopg.connect(self.dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("delete from schema_migrations where version = 4")
+        rerun = self.run_migrate("--apply")
+        self.assertEqual(rerun.returncode, 0, rerun.stdout[-1200:] + rerun.stderr[-800:])
+        self.assertTrue(json.loads(rerun.stdout)["ok"])
+        self.assertEqual(self.check_constraint_name("ops_import_batches", "dataset"),
+                         "ck_ops_import_batches_dataset")
 
     def test_apply_adopts_schema_created_by_init(self):
         """历史库（init 建表、无版本行）升级：认领基线而不是重跑 DDL。"""

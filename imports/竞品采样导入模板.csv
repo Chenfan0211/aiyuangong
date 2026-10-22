@@ -1,0 +1,3 @@
+date,store_id,competitor_id,package_name,price,activity,activity_note,source_method,source_note,sampled_by
+2026-10-19,WH-LION-001,CMP-001,双人套餐,168,满100减20,平台活动页可见,平台前台,平台前台公开页面人工查看,员工小李
+2026-10-19,WH-LION-001,CMP-002,单人套餐,68,,,到店,到店实地查看,员工小王

@@ -5,7 +5,7 @@
 - 门店：武汉狮子座店（`store_id = WH-LION-001`）
 - 形态：单店生产化加固版本，支持 FastAPI + PostgreSQL、云主机 HTTPS、管理岗 TOTP、图片证据和 owner 管理后台
 - 技术栈：Python 3.12 + FastAPI + PostgreSQL 16 + Docker Compose + Caddy
-- 当前验证基线：**499 个 Python 用例 + 30 个 Playwright 浏览器用例全部通过**
+- 当前验证基线：**742 个 Python 用例 + 34 个 Playwright 浏览器用例**；第 3-10 期新增的 140 个用例全部通过（另有 1 个既有门店侧用例因数据日期硬编码在跨日时失败，待单独修复）
 - 生产化落地状态与未闭环边界见 `PRODUCTION_READINESS.md`
 
 ---
@@ -14,6 +14,14 @@
 
 | 项 | 要求 |
 |---|---|
+| 2026-10-22 | 第 10 期（多员工/团队与渠道扩展，原 P5）：`digital_employee.py`（岗位档案 + 能力引用，能力 id 必须存在于第 5 期注册表）、`team.py`（团队：数字员工领导 + `human_fallback` 人工兜底；成员支持数字员工与真人；团队任务 **指派 + 认领**，状态机 offered → claimed → completed，非法转换拒绝；**不做竞标与血条赛制**）；四张表进权威模型（`Migration v15`）与保留策略（档案永久、团队任务 730 天）；五条接口 + `workforce:read/manage` 权限（路由 86 → 91）。**入站统一收口复用既有的 `/api/inbound/messages/{provider}`**，不新建第二套通道。新增 11 个用例。 |
+| 2026-10-22 | 第 9 期（记忆 + 反馈进化，原 P4）：`memory.py`（三类记忆的规则式抽取、按内容哈希去重并累加 hits、按租户/门店/用户隔离召回）；`skill_evolution.py`（偏好达到证据阈值时蒸馏为 `sop_step` 提案、反思提案、人工确认）；两张表进权威模型（`Migration v14`）与保留策略（各 730 天）；四条接口 + `memory:read/write`、`evolution:read/decide` 权限（路由 82 → 86）。**不做规则侧改动**（规则调参已在第 3 期完成）；提案只记录，未人工确认时系统行为完全不变。新增 13 个用例。 |
+| 2026-10-22 | 第 8 期（工具模板/实例 + 沙箱，原 P3）：`tool_manifest.py`（manifest 校验与 ZIP 导入导出，**导出 secret 一律清空**）、`tool_registry.py`（模板/实例/凭据三表；凭据只存 sha256 哈希与掩码；网络策略、跨店与超时三类拒绝都写 `agent_tool_runs` 留痕）、`tool_sandbox.py`（受控入口白名单 + 独立子进程 + 1-3600 秒超时 + 结果 200 KiB 上限；崩溃/超时不影响主进程）；三张表进权威模型（`Migration v13`）与保留策略（永久）；五条接口 + `tool:read/manage/invoke` 权限（路由 77 → 82）。**安全决策**：沙箱是 README 14.4 第 6 条的唯一显式豁免处（行内 `# noqa: dangerous` + 理由），且不支持任意用户脚本，只执行白名单入口。新增 13 个用例。 |
+| 2026-10-22 | 第 7 期（SOP 状态机 + 技能图，原 P2）：`sop.py`（4 类节点 agent/human/approval/condition、图校验：唯一入口/节点类型/边引用/分支 default 出口；版本与单一生效版本）、`sop_runtime.py`（8 态状态机 + 非法转换拒绝 + 断点快照 + `submit_human`/`resume` + SOP 级 `max_hours` 与步骤级超时出口）；四张表进权威模型（`Migration v12`）与保留策略（定义/版本永久、运行与步骤 730 天）；五条接口 + `sop:read/manage/run` 权限（路由 72 → 77）；审批节点复用既有 `/api/approvals`。**边界固化**：task 状态变更不直接改写 sop_run（必须经 `submit_human`）。新增 14 个用例。 |
+| 2026-10-22 | 第 6 期（知识库 RAG，原 P1）：`knowledge.py`（Markdown 章节切分 + 章节内切片 + 标题/关键词结构感知打分 + 三条引用治理规则：重编号、截断分档、剥离页脚；引用带 `document_id`/`chunk_id`/`heading_path` 可回查）；**无命中明确返回「知识库没有相关内容」**；导入按 sha256 幂等；五张表进权威模型（`Migration v11`）与保留策略（知识库/文档/chunk 永久、引用与入库任务 180 天）；`/api/knowledge/bases`、`/api/knowledge/documents`、`/api/knowledge/search` 三条接口与 `knowledge:read/manage` 权限（路由 69 → 72）；`search_knowledge` 工具（工具总数 15 → 16）与 `/api/chat` 的 `citations`。**未做**：向量检索（本环境无 `pgvector`，按计划作为后续增强项，默认关闭）；SSE 流式对话未回填引用。新增 12 个用例。 |
+| 2026-10-22 | 第 5 期（能力注册与作用域底座，原 P0）：`capability_scope.py`（作用域值对象 + required ⊆ allowed 校验）、`capabilities.py`（15 个工具注册为 `tool:<name>` 能力；`available_for()` 按身份过滤；受控调用越权即拒并写 `agent_tool_runs` 的 `blocked` 留痕）；`capabilities`/`capability_bindings` 两表进权威模型（`Migration v10`）与保留策略（主数据永久）；`GET /api/capabilities`（路由 68 → 69）。**实施偏差**：为让「tools 数组与改造前逐字一致」可证伪，ToolSpec 仍是声明真相源、注册表从它派生（有用例逐字比对），参数适配仍由 `llm_agent._invoke` 承担。新增 11 个用例。 |
+| 2026-10-22 | 第 4 期（巡店独立流程 + 申诉闭环）：`inspection.py` + `inspection_templates`/`inspection_items`（固定字段模板、版本与单一生效版本、巡店任务 `category=inspection`、缺项复核）；`appeal.py` + `appeals`（一任务一次有效申诉、驳回必须写结论）；`GET/POST /api/inspection-templates`、`POST /api/inspections`、`GET /api/inspections/{task_id}`、`POST /api/appeals`、`POST /api/appeals/{appeal_id}/decide` 六条接口与 `inspection:*`/`appeals:*` 五个权限（路由 62 → 68）；**未结案申诉阻断奖惩审批**（409）；看板任务按 `category` 计数以区分巡店；三张表进权威模型（`Migration v9`）与保留策略（模板永久、申诉 730 天）。新增 14 个用例。 |
+| 2026-10-22 | 第 3 期第 1-6 步（规则外置与版本化 + 归因回灌）：`action_rules` 转正 + `rule_store.py`（版本/状态机/单一 approved 约束）；`rule_seed.py` 导出 7 条内置规则并支持 `rules-seed --approve` 生效；`rule_eval.py` 表驱动执行器 + 与内置引擎逐字段一致性回归（含真实 `build_snapshot` 快照）；`GET/POST /api/rules`、`/versions`、`/decide` 四个接口与 `rules:read/write/decide` 权限；`generate_daily_plan(rules=...)` 注入，规则未就绪时回退内置并写 `plan_rule_fallback` 审计；第 5 步：`analysis.RULE_VERSION`/`DIAGNOSIS_RULE_VERSION` 改为读表版本 + 代码兜底，`task_feedback`/`task_outcomes` 收口进 `schema.sql` 与 `pg_sync`（`Migration v6`）；第 6 步：任务带 `rule_key`/`rule_version`（`Migration v7`）以支持追溯，新增 `rule_outcomes.py` 与 `rule_outcomes` 表（`Migration v8`）把任务结果按规则版本聚合成**调参提案**（从不回写 `action_rules`），`GET /api/rules/{rule_key}/outcomes` 与 `store_cli.py rules-outcomes`；三张归因表纳入保留策略（730 天）。新增 52 个用例。 |
 | Python | **3.10+**（开发与验证环境为 3.12.10） |
 | 第三方依赖 | 一期入口 **无**（仅标准库）；FastAPI 入口与 PG 落地见 `requirements.txt` |
 | 操作系统 | Windows 已验证；macOS / Linux 同样适用 |
@@ -71,7 +79,7 @@ python -m unittest discover -p "test_*.py"     # Windows
 python3 -m unittest discover -p "test_*.py"    # macOS / Linux
 ```
 
-当前基线：**499 个 Python 用例 + 30 个 Playwright 浏览器用例全部通过**（含 FastAPI 完整接口契约、PostgreSQL 迁移/等价性/RLS、标准库核心备用入口、推送与大模型工具调用均用本地桩实测 HTTP）。
+当前基线：**742 个 Python 用例 + 34 个 Playwright 浏览器用例**（含 FastAPI 完整接口契约、PostgreSQL 迁移/等价性/RLS、标准库核心备用入口、推送与大模型工具调用均用本地桩实测 HTTP）。
 
 ---
 
@@ -95,13 +103,27 @@ python platform_sync.py --store-id WH-LION-001 summary --days 7
 
 `import-dir` 输出 `file_count / success_count / skipped_count / failed_count` 以及每个文件的明细（数据集类型、读入行数、写入行数、日期范围、失败原因）。只要有文件失败，命令退出码为 **1**，便于计划任务告警。
 
-### 3.2 三类数据集（按表头自动识别）
+### 3.2 九类数据集（按表头自动识别）
 
 | 数据集 | 模板 | 必需字段 |
 |---|---|---|
 | 平台日指标 | `imports/平台数据导入模板.csv` | `date,platform,store_id` + `impressions,detail_views,paid_orders,verified_orders,gmv,refunds,review_count,negative_review_count,avg_rating` |
 | 套餐/商品明细 | `imports/套餐明细导入模板.csv` | `date,platform,store_id,package_id,package_name,detail_views,paid_orders,verified_orders,gmv` |
 | 评价明细 | `imports/评价明细导入模板.csv` | `review_id,platform,store_id,rating,created_at`（可选 `status,category,replied_at`） |
+| 开台与客流（门店侧） | `imports/开台与客流导入模板.csv` | `date,store_id` + `tables_opened,table_capacity,covers,revenue` |
+| 时段分布（门店侧） | `imports/时段分布导入模板.csv` | `date,store_id,slot` + `covers,orders,revenue` |
+| 库存与物料（门店侧） | `imports/库存与物料导入模板.csv` | `date,store_id,item_id,name,unit` + `quantity,safety_stock` |
+| 商圈（门店侧） | `imports/商圈导入模板.csv` | `store_id,area_id,area_name`（可选 `area_type,note`） |
+| 竞品门店（竞品） | `imports/竞品门店导入模板.csv` | `store_id,competitor_id,competitor_name,area_id`（可选 `note`） |
+| 竞品采样（竞品） | `imports/竞品采样导入模板.csv` | `date,store_id,competitor_id,package_name,price` + **必填** `sampled_by,source_method,source_note`；可选 `activity,activity_note` |
+
+**两类数据分库存放**：平台侧三类写平台指标库（`--db`），门店侧四类写门店侧数据库（`--store-db`）。
+`import-dir` 会把同一个收件箱里的七类文件按表头分别投递，门店侧数据可混放、可逐类导入：
+`import-traffic` / `import-timeslot` / `import-inventory` / `import-trade-area`。
+门店侧数据的新鲜度与摘要用 `python platform_sync.py ops-status` 与 `ops-summary --days 7` 查看。
+
+- **库存预警**在导入时按"剩余量 ÷ 安全库存"自动分级：低于 50% 记 `critical`，低于 100% 记 `warning`，不设安全库存则不预警。
+- **开台数据**会校验 `tables_opened` 不得大于 `table_capacity`，避免把明显不合理的盘点写进库。
 
 约束与语义：
 
@@ -213,7 +235,7 @@ python store_cli.py overdue
 
 ### 5.1 接口
 
-FastAPI 是完整接口的唯一权威入口。开发环境启动后打开 <http://127.0.0.1:8766/docs> 查看 OpenAPI；当前共有 50 条 `/api/*` 路由，按能力分组如下：
+FastAPI 是完整接口的唯一权威入口。开发环境启动后打开 <http://127.0.0.1:8766/docs> 查看 OpenAPI；当前共有 91 条 `/api/*` 路由，按能力分组如下：
 
 - 认证与账户安全：登录、MFA 验证、临时口令修改、登出、当前身份。
 - 管理后台：成员与角色、门店配置 revision、运维运行与重试队列。
@@ -221,6 +243,17 @@ FastAPI 是完整接口的唯一权威入口。开发环境启动后打开 <http
 - 任务与结果：今日任务、任务详情、证据文本/图片上传、反馈、D+7/D+28 结果、状态流转。
 - 治理：审批列表/申请/决策、审计流水、工具调用留痕。
 - 对话与回调：会话历史、Agent 对话、飞书/企微/mock 审批回调。
+- 门店侧数据：`/api/ops-data/status`（新鲜度）、`/api/ops-data/summary`（开台/时段/库存预警）、`/api/ops-data/import`（从收件箱导入，需 `ops:import`）。
+- 竞品：`/api/competitor/matches`（读写匹配台账，写需 `competitor:match`）、`/api/competitor/compare`（四维对比）。
+- 规则库：`/api/rules`（读规则与版本，需 `rules:read`）；`POST /api/rules` 与 `/api/rules/{rule_key}/versions` 提交草稿（需 `rules:write`）；`/api/rules/{rule_key}/decide` 审批/暂停/退役（需 `rules:decide`）。`/api/rules/{rule_key}/outcomes` 查看该规则的效果归因与调参提案（需 `rules:read`）。
+- 巡店与申诉：`/api/inspection-templates`（读写，写需 `inspection:manage`）、`/api/inspections`（按模板生成巡店任务，需 `inspection:submit`）、`/api/inspections/{task_id}`（缺项复核，需 `inspection:read`）、`/api/appeals`（员工提交申诉，需 `appeals:submit`）、`/api/appeals/{appeal_id}/decide`（受理申诉，需 `appeals:decide`；未结案申诉阻断奖惩审批）。
+- 知识库：`/api/knowledge/bases`（列表，需 `knowledge:read`）、`/api/knowledge/documents`（导入，按内容 hash 幂等，需 `knowledge:manage`）、`/api/knowledge/search`（结构感知检索，无命中明确说明；命中的引用可回查文档/章节/片段）。`POST /api/chat` 响应新增 `citations`（向后兼容）。
+- SOP：`/api/sops`（新建首个版本，需 `sop:manage`）、`/api/sops/{sop_id}/versions`（新版本）、`/api/sops/{sop_id}/runs`（发起运行，需 `sop:run`）、`/api/sop-runs/{run_id}`（运行与步骤，需 `sop:read`）、`/api/sop-runs/{run_id}/resume`（人工节点提交或审批回调恢复；审批复用既有 `/api/approvals*`，不新建通道）。
+- 工具模板与沙箱：`/api/tools`（模板与实例，需 `tool:read`）、`/api/tool-instances`（派生实例，凭据只存哈希，需 `tool:manage`）、`/api/tool-instances/{instance_id}/invoke`（受控沙箱内调用，需 `tool:invoke`）、`/api/tool-templates/export`（导出 ZIP，**secret 字段一律清空**）与 `/api/tool-templates/import`。
+- 记忆与进化：`/api/memory`（读写；读按门店/用户隔离，写会抽取三类记忆并在偏好达到证据阈值时蒸馏提案）、`/api/evolution/proposals`（列表）、`/api/evolution/proposals/{proposal_id}/decide`（人工确认，**只改提案状态、不改运行行为**）。
+- 数字员工与团队：`/api/digital-employees`（读写；能力必须引用第 5 期注册表的 `tool:<name>` id）、`/api/teams`（建团队：数字员工领导 + 人工兜底）、`/api/teams/{team_id}/tasks`（指派或挂池等认领，**不做竞标与血条赛制**）。入站统一收口沿用既有 `/api/inbound/messages/{provider}`，不新建第二套通道。
+- 能力注册表：`/api/capabilities`（按当前身份过滤返回可用能力清单，含 `capability_id`、所需权限与作用域）。
+- 流式对话：`/api/chat/stream`（SSE，事件为 status / delta / done / error）。
 - 运维：`/livez`、`/readyz`、`/metrics`。
 
 接口集合由 `test_api_coverage.py` 的路由契约测试锁定，避免文档继续手工维护一份容易过期的完整路径表。标准库备用入口只提供核心子集，能力边界见第 7.1 节。
@@ -287,6 +320,16 @@ curl -X POST http://127.0.0.1:8766/api/auth/logout -H "Authorization: Bearer <to
 | `pricing:draft`（调价草稿） | ✓ | — | ✓ | ✓ | — |
 | `audit:read` | ✓ | ✓ | — | — | — |
 | `config:write` / `store:manage` | ✓ | — | — | — | — |
+| `ops:import`（导入门店侧经营数据） | ✓ | ✓ | ✓ | ✓ | — |
+| `competitor:match`（确认本店套餐 ↔ 竞品套餐） | ✓ | ✓ | — | — | — |
+| `rules:read`（查看规则与版本） | ✓ | ✓ | ✓ | ✓ | — |
+| `rules:write`（提交规则草稿） | ✓ | ✓ | ✓ | — | — |
+| `rules:decide`（规则审批/暂停/退役） | ✓ | ✓ | — | — | — |
+| `inspection:read`（查看巡店模板与任务） | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `inspection:manage`（维护巡店模板） | ✓ | ✓ | ✓ | — | — |
+| `inspection:submit`（生成/提交巡店任务） | ✓ | ✓ | ✓ | ✓ | — |
+| `appeals:submit`（提交申诉） | ✓ | ✓ | ✓ | — | ✓ |
+| `appeals:decide`（受理申诉） | ✓ | ✓ | ✓ | — | — |
 
 关键点：**没有财务权限的角色拿到的是被裁剪的数据结构**——响应里根本不存在 `gmv` / `refunds` / `refund_rate` 字段，不是靠文案隐藏。
 
@@ -546,9 +589,29 @@ python store_cli.py notify-history             # 查看推送记录
 ├─ agent_server.py          标准库核心备用入口（非完整等价，仅 127.0.0.1）
 ├─ store_agent.py           对话与权限内核（意图规则表、槽位解析、角色可见性、高风险拦截）
 ├─ prototype.py             规则引擎：由经营快照生成动作草稿（纯函数，不产生副作用）
+├─ rule_store.py            规则库：版本、状态机、审批留痕（第 3 期）
+├─ rule_eval.py             表驱动规则执行器（与内置引擎逐字段一致）
+├─ rule_seed.py             内置规则导出与种子（`--approve` 直接生效）
+├─ rule_outcomes.py         规则效果归因：按规则版本聚合任务结果并生成调参提案（不回写规则）
+├─ inspection.py           巡店模板与巡店任务、缺项复核（固定字段，不做拖拽编排）
+├─ appeal.py               员工申诉闭环：一任务一次、未结案时奖惩不得生效
+├─ capabilities.py         能力注册表：把 ToolSpec 注册为带 id/作用域/授权的能力（越权拒绝并留痕）
+├─ capability_scope.py     能力作用域值对象与 required ⊆ allowed 校验
+├─ knowledge.py             知识库：章节切片、结构感知检索、引用治理（重编号/截断/剥离页脚）
+├─ sop.py                  SOP 定义与版本：4 类节点、图校验、单一生效版本
+├─ sop_runtime.py          SOP 执行：8 态状态机、断点快照、恢复与超时出口
+├─ tool_manifest.py        工具 manifest：校验、导出（清空 secret）、导入
+├─ tool_registry.py        工具模板/实例/凭据注册表（凭据只存哈希与掩码）
+├─ tool_sandbox.py         受控沙箱：独立子进程 + 超时 + 网络策略（唯一显式豁免处）
+├─ memory.py                长期记忆：三类（profile/preference/fact）抽取、去重与隔离召回
+├─ skill_evolution.py       技能进化：蒸馏与反思提案 + 人工确认（只改提案状态）
+├─ digital_employee.py      数字员工档案：岗位 + 能力引用（校验第 5 期注册表）
+├─ team.py                  团队与团队任务：数字员工领导 + 人工兜底；指派 + 认领
 ├─ platform_data.py         SQLite 统一指标库（校验、幂等批次、新鲜度、周期对比）
+├─ store_ops_data.py        门店侧经营数据（开台/客流、时段、库存预警、商圈）与统一收件箱导入
+├─ competitor.py            竞品监控（竞品门店、采样明细、人工确认匹配、四维对比）
 ├─ platform_sync.py         数据命令行：import-dir / import-csv / import-packages / import-reviews / data-quality / status / summary
-├─ store_cli.py             运营命令行：snapshot/plan/tasks/evidence/set-status/overdue/approvals/decide/request/audit/dashboard/weekly/monthly
+├─ store_cli.py             运营命令行：snapshot/plan/tasks/evidence/set-status/overdue/rules-seed/rules-outcomes/approvals/decide/request/audit/dashboard/weekly/monthly
 ├─ snapshot_builder.py      快照组装：数据库 + store_config.json → 规则引擎输入
 ├─ task_store.py            任务与证据库：状态机、指纹去重、逾期扫描、会话绑定
 ├─ store_config.json        唯一人工维护的配置（成本/目标/周期/责任人/阈值）
@@ -729,12 +792,15 @@ python store_cli.py purge --apply --export data/archive   # 先归档待删行�
 4. 平台密钥、口令、webhook 密钥不得写入代码/前端/日志/数据库：口令只存 scrypt 哈希、令牌只存 SHA-256；
    `gate-check` 会扫描明文密钥（运行时模块与测试文件都扫，允许 `# noqa: secret` 显式豁免夹具）。
 5. **生产必须用非所有者角色连 PostgreSQL**，否则 RLS 被绕过（`gate-check --dsn` 会直接判不通过）。
-6. 运行时模块禁止 shell 调用、任意删除与动态执行（`gate-check` 扫描，确需使用要写 `# noqa: dangerous` 说明理由）。
+6. 运行时模块禁止 shell 调用、任意删除与动态执行（`gate-check` 扫描，确需使用要写 `# noqa: dangerous` 说明理由）。（第 8 期的受控沙箱入口 `tool_sandbox.py` 已按此规则**显式申请白名单**并在该行写明理由，未放宽全局扫描规则）
 
 ## 15. 版本记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-21 | 第 2 期（竞品监控）：A 批数据底座（`Migration v4` 放宽 `ops_import_batches.dataset` 枚举、竞品三表 + RLS）、B 批导入（`competitor.py`、九类数据集接入统一收件箱、商圈完整性校验、合规三字段必填）、C 批匹配闸门（新增 `competitor:match` 权限、匹配接口 + 审计留痕）。 |
+| 2026-10-21 | 第 11 期（竞品四维对比 + 对话问数，并入原第 2 期 D 批）：`CompetitorStore.compare()` 四维对比（价格分档/分位、套餐档位覆盖与价差、活动分布、商圈中位数环比，按商圈分组）；`/api/competitor/compare`；快照注入与竞品对比规则（每商圈一条草稿）；**对话修三处根因**（风险词"提及即拦"改"执行诉求"、宽泛关键词收紧、兜底按主题引导）；**模型优先路由**（关键词降为兜底）；**5 个问数工具**（工具总数 10 → 15）；**SSE 流式对话** `/api/chat/stream`（前端读取器放共享客户端）。新增 16 个用例。 |
+| 2026-10-20 | 第 1 期（经营数据入口扩展）：新增 `store_ops_data.py`（开台/客流、时段分布、库存与物料、商圈四类数据集）、`store_traffic_daily`/`time_slot_metrics`/`inventory_items`/`inventory_alerts`/`trade_areas`/`ops_import_batches` 六张表、门店侧独立批次账本与库存预警分级；`import-dir` 升级为统一收件箱（平台侧 + 门店侧共七类，按表头分投）；规则引擎新增低峰时段提效与库存补货两条仅出草稿的规则；看板新增时段分布与库存预警两张**默认关闭**的卡片；新增 3 条接口（`/api/ops-data/*`）与 `ops:import` 权限；`analysis.py` 未改动。新增 42 个测试（541/541 通过） |
 | 2026-10-18 | 批次 1：修复 SQLite 连接泄漏（16/16 测试在 Windows 全绿）；新增 `README.md`、`requirements.txt`、`.gitignore`、`config/env.example`、`imports/inbox/` 占位 |
 | 2026-10-18 | 批次 15（P0 #6 收口）：新增 `retention.py` 数据保留与删除策略（20 张表逐表期限、默认只出计划、`--apply` 才删、先归档再删、`retention_purge` 审计）；`store_config.json` 写入 retention 段；CLI 新增 `retention-plan` / `purge`；`gate-check` 增加"保留策略已配置"检查；新增 13 个测试（253/253 通过） |
 | 2026-10-18 | 生产化加固：CLI 编码、严格 CSP、TOTP MFA、HttpOnly Cookie、租户级备份/保留期、按规则数据就绪闸门、Docker Compose + Caddy、健康检查、图片证据、管理后台、任务验收与 D+7/D+28 结果模块；完整回归基线见 `PRODUCTION_READINESS.md` |
@@ -746,7 +812,7 @@ python store_cli.py purge --apply --export data/archive   # 先归档待删行�
 | 2026-10-18 | 批次 9（二期-3）：新增 `governance.py`（审批流 + 工具调用留痕 + 审计查询）与 `governance.html` 审批/审计界面；`approvals`、`agent_tool_runs` 从规划表提升为已落地表；新增 `approvals:request` 权限；两套传输层各加 5 个治理接口并接入工具留痕；`store_cli.py` 新增 approvals/decide/request/audit 与派单自动开审批单；新增 30 个测试（160/160 通过） |
 | 2026-10-18 | 批次 8b（二期-2 续）：`db.py` 升级为双引擎方言层（占位符翻译、行规范化、RETURNING id、方言 DDL/补列、会话时区）；四个 store 与全部 CLI/服务入口都接受 `postgresql://` DSN；`schema.sql` 增补运行时唯一索引与 `tenant_id` 默认值；新增 3 个跨引擎等价性测试（130/130 通过）；实测导入/派单/服务/任务闭环全部在真实 PostgreSQL 16.2 上跑通 |
 | 2026-10-18 | 批次 8（二期-2）：`schema.sql` 重写为权威 PostgreSQL 16 模型（已落地段与规划段分开、逐表 `tenant_id`）；新增 `pg_sync.py`（建表/迁移/对账）并用真实 PostgreSQL 16.2 验证（DDL、行数一致、7 项业务口径一致）；新增 `app_fastapi.py` FastAPI 入口（OpenAPI）；新增 18 个测试（127/127 通过） |
-| 2026-10-18 | 批次 7（二期-1）：新增 `auth.py`（scrypt 口令、随机令牌仅存哈希、12h TTL+滑动续期、登录节流锁定、RBAC 权限点、租户/门店作用域、审计与脱敏）；服务端改为 Bearer 令牌鉴权并新增 `/api/auth/login|logout|me`，默认 `session` 模式；`store_cli.py` 新增 `auth-init`/`auth-list`/`auth-audit`；`agent.html` 改为登录制；新增 32 个测试（109/109 通过） |
+| 2026-10-18 | 批次 7（二期-1）：新增 `auth.py`（scrypt 口令、随机令牌仅存哈希、12h TTL+滑动续期、登录节流锁定、RBAC 权限点、租户/门店作用域、审计与脱敏）；服务端改为 Bearer 令牌鉴权并新增 `/api/auth/login` / `logout` / `me`，默认 `session` 模式；`store_cli.py` 新增 `auth-init`/`auth-list`/`auth-audit`；`agent.html` 改为登录制；新增 32 个测试（109/109 通过） |
 | 2026-10-18 | 批次 6：Agent 意图改为显式规则表 + 槽位解析；新增 `agent_tools.py` 只读工具集（指标/数据质量/任务/日报）与结构化依据；`agent_server.py` 新增 6 个接口（任务、质量、日报）并接入会话绑定与写操作门禁；`agent.html` 增加今日三件事、数据质量条、日报按钮；`daily_sync.ps1` 串联导入→体检→派单；新增 24 个测试（76/76 通过） |
 | 2026-10-18 | 批次 5：新增 `snapshot_builder.py`（数据+配置→规则输入，取代手填快照）、`task_store.py`（任务/证据/事件/会话，指纹去重 + 状态机 + 逾期扫描）、`store_cli.py`、`store_config.json`；连接实现收敛到 `db.py`；新增 17 个测试（52/52 通过） |
 | 2026-10-18 | 批次 4：新增 `data-quality` 数据质量体检（缺日检测、日环比跳变、批次审计、可配置新鲜度阈值）与 `refund_rate` / `negative_rate` 两个派生指标；`daily_sync.ps1` 加入体检步骤；新增 10 个测试（35/35 通过） |

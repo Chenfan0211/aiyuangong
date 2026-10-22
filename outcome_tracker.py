@@ -33,8 +33,8 @@ OUTCOME_STATUSES = ("computed", "no_data", "pending")
 
 MetricReader = Callable[[str, str, str], Optional[float]]
 
-# 与 schema.sql 的其它租户表保持同样的落库形状；PostgreSQL 侧补开关行级安全，
-# 因为本批次不允许改 schema.sql（表由本模块自建）。
+# 与 schema.sql 的其它租户表保持同样的落库形状；第 3 期第 5 步起这两张表已收口进
+# schema.sql / pg_sync 的权威模型，这里保留幂等 DDL 供 SQLite 运行时与既有库自愈。
 _TABLES_DDL = """
 create table if not exists task_feedback (
   tenant_id text not null default '',

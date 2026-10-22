@@ -94,16 +94,70 @@ class StoreReporter:
         task_store: TaskStore,
         approval_store: Optional[Any] = None,
         config_path: Optional[Path] = None,
+        ops_store: Optional[Any] = None,
     ):
         self.config = config
         self.metric_store = metric_store
         self.task_store = task_store
         self.approval_store = approval_store
+        self.ops_store = ops_store
         self.config_path = Path(config_path) if config_path else None
         self.store_id = str(config.get("store_id") or "")
         self.store_name = str(config.get("name") or self.store_id)
         if not self.store_id:
             raise ValueError("门店配置缺少 store_id")
+
+    # ---------------- 门店侧看板卡片 ----------------
+
+    def ops_cards(self, start: date, end: date, include_financial: bool = True) -> dict[str, Any]:
+        """门店侧两张卡片（时段分布 / 库存预警）。
+
+        默认关闭：只有 `store_config.json` 的 `ops_cards` 显式打开才返回数据，
+        避免新维度一上线就把看板堆满。未接入数据源或还没导入时如实回报状态，
+        不用空列表冒充"没有异常"。
+        """
+        flags = self.config.get("ops_cards") or {}
+        window_days = min(max((end - start).days + 1, 1), 90)
+        cards: dict[str, Any] = {
+            "time_slots": {
+                "enabled": bool(flags.get("time_slots")),
+                "state": "disabled",
+                "window_days": window_days,
+                "turnover_rate": None,
+                "items": [],
+            },
+            "inventory_alerts": {
+                "enabled": bool(flags.get("inventory_alerts")),
+                "state": "disabled",
+                "latest_stock_date": None,
+                "items": [],
+            },
+        }
+        if not (cards["time_slots"]["enabled"] or cards["inventory_alerts"]["enabled"]):
+            return cards
+        if self.ops_store is None:
+            for card in cards.values():
+                if card["enabled"]:
+                    card["state"] = "not_connected"
+            return cards
+        summary = self.ops_store.summary(self.store_id, days=window_days, today=end)
+        if cards["time_slots"]["enabled"]:
+            items = [dict(item) for item in summary.time_slots]
+            if not include_financial:
+                for item in items:
+                    item.pop("revenue", None)
+            cards["time_slots"].update({
+                "state": "ok" if items else "no_data",
+                "turnover_rate": summary.traffic.get("turnover_rate"),
+                "items": items,
+            })
+        if cards["inventory_alerts"]["enabled"]:
+            cards["inventory_alerts"].update({
+                "state": "ok" if summary.inventory.get("has_data") else "no_data",
+                "latest_stock_date": summary.inventory.get("latest_date"),
+                "items": summary.alerts,
+            })
+        return cards
 
     # ---------------- 取数 ----------------
 
@@ -118,14 +172,20 @@ class StoreReporter:
         tasks = [item for item in self.task_store.list_tasks(self.store_id, limit=500)
                  if str(item.get("created_at", ""))[:10] >= since]
         counts: dict[str, int] = {}
+        categories: dict[str, int] = {}
         for task in tasks:
             counts[task["status"]] = counts.get(task["status"], 0) + 1
+            # 第 4 期：巡店任务（category=inspection）与普通任务在看板可区分
+            category = str(task.get("category") or "unknown")
+            categories[category] = categories.get(category, 0) + 1
         total = len(tasks)
         verified = counts.get("verified", 0)
         return {
             "days": days,
             "total": total,
             "count_by_status": counts,
+            "count_by_category": categories,
+            "inspection_count": categories.get("inspection", 0),
             "open_count": sum(counts.get(status, 0) for status in OPEN_STATUSES),
             "overdue_count": counts.get("overdue", 0),
             "completion_rate": _round(verified / total * 100, 1) if total else None,
@@ -227,6 +287,8 @@ class StoreReporter:
         if pending:
             issues.append(f"有 {pending} 张审批单待决策（改价/赔付/外发等高风险动作）")
 
+        ops_cards = self.ops_cards(start, end, include_financial=include_financial)
+
         return {
             "store_id": self.store_id,
             "store_name": self.store_name,
@@ -252,6 +314,8 @@ class StoreReporter:
                              "freshness": {k: v["state"] for k, v in quality["freshness"].items()}},
             "issues": issues,
             "sources": self._sources(start, end),
+            "time_slots": ops_cards["time_slots"],
+            "inventory_alerts": ops_cards["inventory_alerts"],
         }
 
     def _margin_rate(self, platform: str, package_id: str) -> Optional[float]:

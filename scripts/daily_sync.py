@@ -186,8 +186,8 @@ def build_default_steps(args: argparse.Namespace) -> list[Step]:
 
     def import_action() -> dict[str, Any]:
         return _command(
-            [python, platform_sync, "--db", metrics_db, "--config", config,
-             "--store-id", store_id, "import-dir", "--inbox", inbox],
+            [python, platform_sync, "--db", metrics_db, "--store-db", store_db,
+             "--config", config, "--store-id", store_id, "import-dir", "--inbox", inbox],
             step_name="import",
         )
 

@@ -60,6 +60,30 @@ PERMISSIONS = (
     "audit:read",
     "config:write",            # 修改门店配置
     "store:manage",            # 管理门店与成员
+    "ops:import",              # 导入门店侧经营数据（开台/时段/库存/商圈）
+    "competitor:match",        # 人工确认"本店套餐 ↔ 竞品套餐"的匹配（判断动作，仅店长级以上）
+    "rules:read",             # 查看规则定义与版本（不含审批）
+    "rules:write",            # 提交规则草稿（新增版本，不代表生效）
+    "rules:decide",           # 审批/暂停/退役规则版本
+    "inspection:read",        # 查看巡店模板与巡店任务
+    "inspection:manage",      # 维护巡店模板（固定字段）
+    "inspection:submit",      # 生成/提交巡店任务与证据
+    "appeals:submit",         # 员工对奖惩草稿提申诉
+    "appeals:decide",         # 受理申诉并给出结论
+    "knowledge:read",         # 检索门店知识库（对话引用来源）
+    "knowledge:manage",       # 维护知识库与导入文档
+    "sop:read",               # 查看 SOP 定义与运行状态
+    "sop:manage",             # 定义/版本化 SOP
+    "sop:run",                # 发起与恢复 SOP 运行
+    "tool:read",              # 查看工具模板与实例
+    "tool:manage",            # 登记模板/派生实例/导入导出
+    "tool:invoke",            # 在沙箱里调用工具实例
+    "memory:read",             # 召回长期记忆
+    "memory:write",            # 沉淀记忆（抽取后落库）
+    "evolution:read",          # 查看进化提案
+    "evolution:decide",        # 人工确认提案（只改提案状态）
+    "workforce:read",          # 查看数字员工与团队
+    "workforce:manage",        # 登记数字员工/建团队/派团队任务
 )
 
 _BASE_WORKER = {"agent:chat", "metrics:read", "tasks:read:own", "tasks:accept",
@@ -70,19 +94,42 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "area_manager": frozenset({
         "agent:chat", "metrics:read", "metrics:read:financial", "quality:read", "report:read",
         "tasks:read:store", "tasks:read:own", "tasks:accept", "tasks:evidence:submit", "tasks:verify",
-        "approvals:request", "approvals:decide", "audit:read",
+        "approvals:request", "approvals:decide", "audit:read", "ops:import",
+        "competitor:match",
+        "rules:read", "rules:write", "rules:decide",
+        "inspection:read", "inspection:manage", "inspection:submit", "appeals:decide",
+        "knowledge:read", "knowledge:manage",
+        "sop:read", "sop:manage", "sop:run",
+        "tool:read", "tool:manage", "tool:invoke",
+        "memory:read", "memory:write", "evolution:read", "evolution:decide",
+        "workforce:read", "workforce:manage",
     }),
     "manager": frozenset({
         "agent:chat", "metrics:read", "metrics:read:financial", "quality:read", "report:read",
         "tasks:read:store", "tasks:read:own", "tasks:accept", "tasks:evidence:submit", "tasks:verify",
-        "approvals:request", "approvals:decide", "pricing:draft",
-    }),
+        "approvals:request", "approvals:decide", "pricing:draft", "ops:import",
+        "competitor:match",
+        "rules:read", "rules:write",
+        "inspection:read", "inspection:manage", "inspection:submit", "appeals:decide",
+            "knowledge:read", "knowledge:manage",
+        "sop:read", "sop:manage", "sop:run",
+        "tool:read", "tool:manage", "tool:invoke",
+        "memory:read", "memory:write", "evolution:read", "evolution:decide",
+        "workforce:read", "workforce:manage",
+}),
     "operator": frozenset({
         "agent:chat", "metrics:read", "metrics:read:financial", "quality:read",
         "tasks:read:store", "tasks:read:own", "tasks:accept", "tasks:evidence:submit",
-        "approvals:request", "pricing:draft",
+        "approvals:request", "pricing:draft", "ops:import",
+        "rules:read",
+        "inspection:read", "inspection:submit",
+        "knowledge:read",
+        "sop:read", "sop:run",
+        "tool:read", "tool:invoke",
+        "memory:read", "memory:write",
+        "workforce:read",
     }),
-    "employee": frozenset(_BASE_WORKER),
+    "employee": frozenset(_BASE_WORKER | {"inspection:read", "appeals:submit", "knowledge:read", "memory:read"}),
 }
 
 WEAK_PASSWORDS = {

@@ -239,7 +239,20 @@ class AgentToolsModeTests(Base):
         result = self.agent().reply("帮我写一段小红书探店文案", "manager-001")
         self.assertEqual(result["intent"], "capability_help")
         self.assertFalse(result["llm_enabled"])
-        self.assertIn("你可以问我", result["answer"])
+        # 第 11 期：兜底不再是一段与问题无关的固定清单，而是"我没确定 + 我能答什么 + 怎么才能答"
+        self.assertIn("没有完全确定", result["answer"])
+        self.assertIn("我现在能直接回答的", result["answer"])
+
+    def test_fallback_guides_by_topic(self):
+        """兜底要按用户问到的主题给可操作指引（第 11 期）。"""
+        self.seed()
+        for question, keyword in (("帮我看看库存够不够", "库存与物料"),
+                                  ("哪个时段人最多", "时段与客流"),
+                                  ("同商圈竞品怎么样", "竞品")):
+            with self.subTest(question=question):
+                result = self.agent().reply(question, "manager-001")
+                self.assertEqual(result["intent"], "capability_help")
+                self.assertIn(keyword, result["answer"])
 
     def test_weak_keyword_scope_is_documented(self):
         """"今天/今日"属弱关键词，会命中任务清单；这是规则表的已知覆盖面，不是缺陷。"""

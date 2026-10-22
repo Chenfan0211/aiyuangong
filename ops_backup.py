@@ -195,10 +195,19 @@ def restore_backup(db_target: Any, path: Path, force: bool = False, *, tenant_id
                 if table not in landed:
                     continue
                 columns = _table_columns(db, conn, table)
-                if "id" in columns:
-                    conn.execute(
-                        f"select setval('{table}_id_seq', coalesce((select max(id) from {table}), 1))"
-                    )
+                if "id" not in columns:
+                    continue
+                # 不能假设"有 id 列就是自增主键"：uuid 主键既没有 <table>_id_seq，
+                # 也不能 max(uuid)。用 pg_get_serial_sequence 判断是否真有序列，
+                # 没有就跳过（第 3 期把 uuid 主键的 action_rules 转正时踩到过）。
+                sequence = conn.execute(
+                    "select pg_get_serial_sequence(?, 'id') as seq", (table,)
+                ).fetchone()["seq"]
+                if not sequence:
+                    continue
+                conn.execute(
+                    f"select setval('{sequence}', coalesce((select max(id) from {table}), 1))"
+                )
     return {"restored": restored, "skipped_tables": skipped,
             "row_total": sum(restored.values()), "source_manifest": payload["manifest"]}
 

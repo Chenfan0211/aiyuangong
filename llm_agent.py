@@ -21,7 +21,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 DEFAULT_MAX_ITERATIONS = 4
 DEFAULT_MAX_TOOL_CALLS = 8
@@ -108,6 +108,43 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
              {"type": "object", "properties": {
                  "date": {"type": "string", "description": "today / yesterday / YYYY-MM-DD"}},
               "required": []}),
+
+    # ---- 第 11 期：门店侧与竞品问数（此前第 1、2 期数据对模型完全不可见） ----
+    ToolSpec("get_store_traffic", "metrics:read",
+             "查询门店侧开台/客流/翻台率。未导入门店侧数据时如实回报缺数，不补零。",
+             {"type": "object", "properties": {
+                 "days": {"type": "integer", "minimum": 1, "maximum": 90, "description": "统计天数，默认 7"}},
+              "required": []}),
+    ToolSpec("get_time_slots", "metrics:read",
+             "查询门店各时段的客流、订单数与订单占比（用于判断哪个时段是低峰）。",
+             {"type": "object", "properties": {
+                 "days": {"type": "integer", "minimum": 1, "maximum": 90, "description": "统计天数，默认 7"}},
+              "required": []}),
+    ToolSpec("get_inventory_alerts", "metrics:read",
+             "查询未处理的库存/物料预警（按剩余量除以安全库存分级：critical 严重不足 / warning 低于安全库存）。",
+             {"type": "object", "properties": {
+                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "条数上限，默认 50"}},
+              "required": []}),
+    ToolSpec("get_competitor_matches", "metrics:read",
+             "查询竞品匹配台账：已确认 / 待确认 / 已驳回的匹配，以及尚未匹配的竞品套餐。",
+             {"type": "object", "properties": {}, "required": []}),
+    ToolSpec("get_competitor_compare", "metrics:read",
+             "查询竞品四维对比：价格带分档与 P25/P50/P75、套餐档位覆盖与已确认匹配的价差、"
+             "活动分布、商圈价格带中位数环比。样本不足时只报样本不足，不下结论；"
+             "只有人工确认过的匹配参与对比。",
+             {"type": "object", "properties": {
+                 "days": {"type": "integer", "minimum": 1, "maximum": 365,
+                          "description": "覆盖默认窗口（默认 28 天）"}},
+              "required": []}),
+    ToolSpec("search_knowledge", "knowledge:read",
+             "检索门店知识库（制度/SOP/手册）并返回可回查的引用：文档、章节路径与片段。"
+             "没有命中时会明确说明知识库没有相关内容，不会编造引用。",
+             {"type": "object", "properties": {
+                 "query": {"type": "string", "description": "检索关键词或问题"},
+                 "base_id": {"type": "string", "description": "只检索某个知识库"},
+                 "limit": {"type": "integer", "minimum": 1, "maximum": 10,
+                           "description": "返回条数，默认 5"}},
+              "required": ["query"]}),
 )
 
 
@@ -126,6 +163,8 @@ class OpenAIToolResponder:
 
     @classmethod
     def from_environment(cls) -> Optional["OpenAIToolResponder"]:
+        from store_agent import load_env_file          # 惰性导入：避免与 store_agent 形成循环
+        load_env_file()
         api_key = os.getenv("STORE_AGENT_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             return None
@@ -134,6 +173,62 @@ class OpenAIToolResponder:
             base_url=os.getenv("STORE_AGENT_LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
             model=os.getenv("STORE_AGENT_LLM_MODEL") or os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         )
+
+    def stream(self, messages: list[dict[str, Any]],
+               tools: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+        """流式调用：逐块 yield `{"type": "content"|"tool_calls", ...}`。
+
+        每轮都用 `stream: true`：`delta.content` 立刻转给前端，`delta.tool_calls`
+        按 index 累积拼装——只有这样才能"边调工具边出字"。
+        """
+        payload: dict[str, Any] = {"model": self.model, "temperature": 0.2,
+                                   "messages": messages, "stream": True}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        request = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.api_key}"},
+            method="POST",
+        )
+        pending: dict[int, dict[str, Any]] = {}
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    if delta.get("content"):
+                        yield {"type": "content", "text": delta["content"]}
+                    for item in delta.get("tool_calls") or []:
+                        index = int(item.get("index") or 0)
+                        slot = pending.setdefault(
+                            index, {"id": "", "type": "function",
+                                    "function": {"name": "", "arguments": ""}})
+                        if item.get("id"):
+                            slot["id"] = item["id"]
+                        function = item.get("function") or {}
+                        if function.get("name"):
+                            slot["function"]["name"] = function["name"]
+                        if function.get("arguments"):
+                            slot["function"]["arguments"] += function["arguments"]
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise ToolCallingError(f"模型流式请求失败：{error}") from error
+        if pending:
+            yield {"type": "tool_calls", "calls": [pending[key] for key in sorted(pending)]}
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         payload: dict[str, Any] = {"model": self.model, "temperature": 0.2, "messages": messages}
@@ -211,6 +306,23 @@ class ToolCallingAgent:
     def _invoke(self, name: str, arguments: dict[str, Any], user: dict[str, Any]) -> Any:
         tools = self.tools
         include_financial = self._can(user, "metrics:read:financial")
+        # ---- 第 11 期：门店侧与竞品问数 ----
+        if name == "get_store_traffic":
+            return tools.store_traffic(days=self._int(arguments.get("days"), 7, 1, 90))
+        if name == "get_time_slots":
+            return tools.time_slots(days=self._int(arguments.get("days"), 7, 1, 90))
+        if name == "get_inventory_alerts":
+            return tools.inventory_alerts(limit=self._int(arguments.get("limit"), 50, 1, 200))
+        if name == "get_competitor_matches":
+            return tools.competitor_matches()
+        if name == "get_competitor_compare":
+            raw_days = arguments.get("days")
+            return tools.competitor_compare(
+                days=self._int(raw_days, 28, 1, 365) if raw_days else None)
+        if name == "search_knowledge":
+            return tools.search_knowledge(user, query=str(arguments.get("query") or ""),
+                                          base_id=arguments.get("base_id") or None,
+                                          limit=self._int(arguments.get("limit"), 5, 1, 10))
         if name == "get_data_status":
             return tools.data_status()
         if name == "get_metric_summary":
@@ -343,6 +455,83 @@ class ToolCallingAgent:
         return {"answer": "（工具调用次数达到上限，我先给出已知信息；如需更完整的结论请缩小问题范围。）",
                 "calls": calls, "sources": sources, "iterations": iterations,
                 "mode": "tool_calling", "maxed_out": True}
+
+    def answer_stream(
+        self,
+        message: str,
+        user: dict[str, Any],
+        history: Optional[list[dict[str, Any]]] = None,
+        session_id: str = "",
+    ) -> Iterator[dict[str, Any]]:
+        """流式版 `answer()`：逐个 yield 事件，供 SSE 使用。
+
+        事件类型：`status`（正在调用某个工具）/ `delta`（答案增量）/ `done`（收尾）/ `error`。
+        编排逻辑与 `answer()` 一致，只是把"等模型整段回完"换成"边收边发"。
+        """
+        specs = self.exposed_specs(user)
+        tools_schema = [spec.as_openai_tool() for spec in specs]
+        messages: list[dict[str, Any]] = [
+            {"role": "system",
+             "content": SYSTEM_PROMPT + f"当前身份：{user.get('name')}（{user.get('role_label')}）。"},
+        ]
+        for item in (history or [])[-6:]:
+            role = item.get("message_role")
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": str(item.get("content", ""))[:1000]})
+        messages.append({"role": "user", "content": message})
+
+        calls: list[dict[str, Any]] = []
+        sources: list[dict[str, Any]] = []
+        iterations = 0
+        try:
+            for iterations in range(1, self.max_iterations + 1):
+                text_parts: list[str] = []
+                tool_calls: list[dict[str, Any]] = []
+                for event in self.responder.stream(messages, tools_schema):
+                    if event["type"] == "content":
+                        text_parts.append(event["text"])
+                        yield {"type": "delta", "text": event["text"]}
+                    else:
+                        tool_calls = event["calls"]
+                if not tool_calls:
+                    yield {"type": "done", "text": "".join(text_parts).strip() or "（模型没有返回内容）",
+                           "calls": calls, "sources": sources, "iterations": iterations,
+                           "mode": "tool_calling", "maxed_out": False}
+                    return
+                messages.append({"role": "assistant", "content": "".join(text_parts) or "",
+                                 "tool_calls": tool_calls})
+                for call in tool_calls:
+                    if len(calls) >= self.max_tool_calls:
+                        messages.append({"role": "user",
+                                         "content": "工具调用次数已达上限，请基于已有信息作答。"})
+                        break
+                    function = call.get("function") or {}
+                    name = str(function.get("name") or "")
+                    yield {"type": "status", "text": f"正在查询：{name}"}
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                        if not isinstance(arguments, dict):
+                            raise ValueError("参数必须是 JSON 对象")
+                    except (json.JSONDecodeError, ValueError) as exc:
+                        arguments, result, error = {}, None, f"工具参数无法解析：{exc}"
+                    else:
+                        result, error = self.dispatch(name, arguments, user)
+                    payload = {"ok": error is None, "data": result, "error": error}
+                    messages.append({"role": "tool", "tool_call_id": call.get("id") or name,
+                                     "content": json.dumps(payload, ensure_ascii=False, default=str)})
+                    calls.append({"name": name, "arguments": arguments, "ok": error is None,
+                                  "error": error})
+                    sources.append({"type": "tool_call",
+                                    "label": f"工具 {name}（{json.dumps(arguments, ensure_ascii=False)}）",
+                                    "tool": name, "ok": error is None})
+                    self._record(user, name, arguments, payload, session_id)
+            yield {"type": "done",
+                   "text": "（工具调用次数达到上限，我先给出已知信息；如需更完整的结论请缩小问题范围。）",
+                   "calls": calls, "sources": sources, "iterations": iterations,
+                   "mode": "tool_calling", "maxed_out": True}
+        except Exception as exc:                    # noqa: BLE001 - 流里出错要转成事件，不能抛
+            yield {"type": "error", "text": f"模型暂时不可用：{exc}",
+                   "calls": calls, "sources": sources}
 
     def _record(self, user: dict[str, Any], name: str, arguments: dict[str, Any],
                 payload: dict[str, Any], session_id: str) -> None:

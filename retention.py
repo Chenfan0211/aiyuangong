@@ -32,10 +32,45 @@ DATE_COLUMNS: dict[str, Optional[str]] = {
     "platform_metrics": "metric_date",
     "package_metrics": "metric_date",
     "metric_import_batches": "max_date",
+    "ops_import_batches": "max_date",
+    "store_traffic_daily": "metric_date",
+    "time_slot_metrics": "metric_date",
+    "inventory_items": "metric_date",
+    "inventory_alerts": "metric_date",
+    "trade_areas": None,
+    "competitor_offers": "sample_date",
+    "competitor_stores": None,
+    "competitor_matches": None,
     "reviews": "created_at",
     "action_tasks": "updated_at",
     "task_evidence": "submitted_at",
     "task_events": "created_at",
+    "task_feedback": "created_at",
+    "task_outcomes": "computed_at",
+    "rule_outcomes": "computed_at",
+    "inspection_templates": None,
+    "inspection_items": None,
+    "appeals": "created_at",
+    "capabilities": None,
+    "capability_bindings": None,
+    "knowledge_bases": None,
+    "knowledge_documents": None,
+    "knowledge_chunks": None,
+    "knowledge_citations": "created_at",
+    "knowledge_ingest_jobs": "created_at",
+    "sops": None,
+    "sop_versions": None,
+    "sop_runs": "finished_at",
+    "sop_step_runs": "entered_at",
+    "tool_templates": None,
+    "tool_instances": None,
+    "tool_credentials": None,
+    "memory_records": "updated_at",
+    "evolution_proposals": "created_at",
+    "digital_employees": None,
+    "teams": None,
+    "team_members": None,
+    "team_tasks": "updated_at",
     "audit_events": "created_at",
     "agent_sessions": "last_message_at",
     "agent_messages": "created_at",
@@ -53,11 +88,15 @@ DATE_COLUMNS: dict[str, Optional[str]] = {
 
 # 先子后父：删除顺序（只列出可清理的表）
 DELETE_ORDER: tuple[str, ...] = (
-    "task_evidence", "task_events", "action_tasks", "approvals",
+    "task_evidence", "task_events", "task_feedback", "task_outcomes", "sop_step_runs", "sop_runs",
+    "knowledge_citations", "knowledge_ingest_jobs",
+    "rule_outcomes", "appeals",
+    "action_tasks", "approvals",
     "agent_messages", "agent_sessions", "agent_tool_runs",
     "notifications", "webhook_nonces", "login_attempts", "auth_sessions",
     "reviews", "package_metrics", "platform_metrics", "metric_import_batches",
-    "audit_events",
+    "inventory_alerts", "inventory_items", "time_slot_metrics", "store_traffic_daily",
+    "ops_import_batches", "competitor_offers", "audit_events",
 )
 
 # 默认保留天数（0 = 永久）：店内可解释的默认值，写进 store_config.json 便于评审与调整
@@ -65,10 +104,45 @@ DEFAULT_RETENTION_DAYS: dict[str, int] = {
     "platform_metrics": 1095,          # 经营指标 3 年（做同比要用）
     "package_metrics": 1095,
     "metric_import_batches": 1095,
+    "store_traffic_daily": 1095,   # 门店侧经营数据 3 年（做同比要用）
+    "time_slot_metrics": 1095,
+    "inventory_items": 365,         # 库存盘点 1 年
+    "inventory_alerts": 365,
+    "trade_areas": 0,               # 商圈维度属主数据，永久保留
+    "competitor_offers": 1095,      # 竞品采样明细 3 年（做同比/环比要用）
+    "competitor_stores": 0,         # 竞品门店属主数据，永久保留
+    "competitor_matches": 0,        # 人工确认的匹配属主数据，永久保留
+    "ops_import_batches": 1095,
     "reviews": 180,                    # 评价明细含顾客内容摘要，半年
     "action_tasks": 730,               # 任务与证据 2 年（申诉与复盘）
     "task_evidence": 730,
     "task_events": 730,
+    "task_feedback": 730,             # 人工反馈含员工评价，2 年
+    "task_outcomes": 730,             # 结果窗口归因，2 年
+    "rule_outcomes": 730,             # 规则效果归因与调参提案，2 年
+    "inspection_templates": 0,        # 巡店模板属主数据，永久保留
+    "inspection_items": 0,
+    "appeals": 730,                   # 申诉记录 2 年（与任务/证据一致）
+    "capabilities": 0,                # 能力注册快照属主数据，永久保留
+    "capability_bindings": 0,
+    "knowledge_bases": 0,                # 知识库与文档属内容资产，永久保留
+    "knowledge_documents": 0,
+    "knowledge_chunks": 0,
+    "knowledge_citations": 180,          # 检索引用留痕半年
+    "knowledge_ingest_jobs": 180,
+    "sops": 0,                         # SOP 定义与版本属主数据，永久保留
+    "sop_versions": 0,
+    "sop_runs": 730,                    # 流程实例与步骤留痕 2 年
+    "sop_step_runs": 730,
+    "tool_templates": 0,                # 工具模板/实例属配置资产，永久保留
+    "tool_instances": 0,
+    "tool_credentials": 0,             # 凭据只存哈希与掩码
+    "memory_records": 730,              # 长期记忆 2 年
+    "evolution_proposals": 730,        # 进化提案 2 年
+    "digital_employees": 0,            # 岗位档案属配置，永久保留
+    "teams": 0,
+    "team_members": 0,
+    "team_tasks": 730,                 # 团队任务留痕 2 年
     "approvals": 730,
     "audit_events": 730,               # 安全审计 2 年
     "agent_messages": 90,              # 对话内容可能含顾客信息，90 天

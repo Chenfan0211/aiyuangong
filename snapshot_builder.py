@@ -25,6 +25,7 @@ from typing import Any, Optional
 from platform_data import PlatformMetricStore
 
 PACKAGE_WINDOW_DAYS = 7
+OPS_WINDOW_DAYS = 7          # 门店侧（时段/开台）看窗，与套餐窗口一致
 NEGATIVE_RATING_MAX = 2
 QUALIFIED_RATING_MIN = 4
 RESOLVED_REVIEW_STATUSES = ("replied", "resolved")
@@ -108,6 +109,8 @@ def build_snapshot(
     metric_store: PlatformMetricStore,
     target_date: date | str | None = None,
     task_store: Optional[Any] = None,
+    ops_store: Optional[Any] = None,
+    competitor_store: Optional[Any] = None,
 ) -> dict[str, Any]:
     """组装 generate_daily_plan() 的输入快照（额外包含 _meta 诊断信息，规则引擎会忽略）。"""
     day = parse_target_date(target_date)
@@ -194,12 +197,61 @@ def build_snapshot(
             "gross_margin_rate": margin,
         })
 
+    # 3.5) 门店侧经营数据（第 1 期）：时段分布与库存预警
+    #      这两个维度属于"可选新增数据源"：没有接入或还没导入时不报错、不产出任务，
+    #      只把原因写进 rule_readiness，由店长决定什么时候开始用。
+    ops_window_start = day - timedelta(days=OPS_WINDOW_DAYS - 1)
+    slot_min_days = max(1, int(rules.get("slot_min_days", 3)))
+    low_slot_share_floor = float(rules.get("low_slot_share_floor", 0.15))
+    ops_payload: dict[str, Any] = {
+        "window": {"start": ops_window_start.isoformat(), "end": day_iso, "days": OPS_WINDOW_DAYS},
+        "traffic": {"has_data": False, "day_count": 0},
+        "time_slots": [],
+        "low_slots": [],
+        "thresholds": {"slot_min_days": slot_min_days, "low_slot_share_floor": low_slot_share_floor},
+        "inventory": {"has_data": False, "latest_date": None, "day_count": 0, "alert_count": 0},
+        "inventory_alerts": [],
+    }
+    if ops_store is None:
+        notes.append("未接入门店侧数据（ops_store），时段提效与库存预警规则本次不参与生成")
+    else:
+        ops_summary = ops_store.summary(store_id, days=OPS_WINDOW_DAYS, today=day)
+        low_slots = [
+            slot for slot in ops_summary.time_slots
+            if slot["day_count"] >= slot_min_days
+            and slot["order_share"] is not None
+            and slot["order_share"] < low_slot_share_floor
+        ]
+        ops_payload.update({
+            "traffic": ops_summary.traffic,
+            "time_slots": ops_summary.time_slots,
+            "low_slots": low_slots,
+            "inventory": ops_summary.inventory,
+            "inventory_alerts": ops_summary.alerts,
+        })
+
+    # 3.8) 竞品四维对比（第 11 期，并入原第 2 期 D 批）
+    competitor_payload: dict[str, Any] = {
+        "has_data": False, "window": {}, "thresholds": {},
+        "by_area": [], "price": {}, "packages": {"matches": []},
+        "activities": {}, "area_change": {},
+        "unmatched_competitor_packages": [], "truncated_matches": 0,
+    }
+    if competitor_store is None:
+        notes.append("未接入竞品数据（competitor_store），竞品对比规则本次不参与生成")
+    else:
+        comparison = competitor_store.compare(store_id, config, today=day)
+        competitor_payload = comparison
+
     # 4) 规则就绪状态：缺数只阻断依赖该数据的规则，不补零
     rule_readiness: dict[str, dict[str, str]] = {
         "review_invite": {"status": "ready", "reason": ""},
         "negative_review": {"status": "ready", "reason": ""},
         "package": {"status": "ready", "reason": ""},
         "overdue": {"status": "ready", "reason": ""},
+        "low_slot": {"status": "ready", "reason": ""},
+        "inventory": {"status": "ready", "reason": ""},
+        "competitor": {"status": "ready", "reason": ""},
     }
     if day > cycle_end:
         rule_readiness["review_invite"] = {
@@ -220,6 +272,50 @@ def build_snapshot(
         rule_readiness["overdue"] = {
             "status": "degraded",
             "reason": "未接入任务库，已跳过逾期升级规则",
+        }
+    # 门店侧两维度：一律用 degraded（不阻塞），避免在门店还没开始导入这两类数据时
+    # 每天都产出"补齐缺失数据"的任务；缺数原因通过 reason 与 notes 暴露。
+    if ops_store is None:
+        rule_readiness["low_slot"] = {
+            "status": "degraded",
+            "reason": "未接入门店侧数据，已跳过低峰时段规则",
+        }
+        rule_readiness["inventory"] = {
+            "status": "degraded",
+            "reason": "未接入门店侧数据，已跳过库存预警规则",
+        }
+    else:
+        slots = ops_payload["time_slots"]
+        enough = [item for item in slots if item["day_count"] >= slot_min_days]
+        if not slots:
+            rule_readiness["low_slot"] = {
+                "status": "degraded",
+                "reason": f"近 {OPS_WINDOW_DAYS} 天没有时段数据，已跳过低峰时段规则",
+            }
+        elif not enough:
+            rule_readiness["low_slot"] = {
+                "status": "degraded",
+                "reason": f"时段样本天数不足（单时段需 ≥ {slot_min_days} 天），已跳过低峰时段规则",
+            }
+        if not ops_payload["inventory"]["has_data"]:
+            rule_readiness["inventory"] = {
+                "status": "degraded",
+                "reason": "没有库存盘点数据，已跳过库存预警规则",
+            }
+    # 竞品同理用 degraded（不阻塞）：门店还没开始采样时，不该天天产出"补竞品数据"的任务
+    if competitor_store is None:
+        rule_readiness["competitor"] = {
+            "status": "degraded", "reason": "未接入竞品数据，已跳过竞品对比规则",
+        }
+    elif not competitor_payload.get("has_data"):
+        rule_readiness["competitor"] = {
+            "status": "degraded",
+            "reason": f"近 {int((rules.get('competitor_window_days') or 28))} 天没有竞品采样数据，已跳过竞品对比规则",
+        }
+    elif not competitor_payload.get("packages", {}).get("matches"):
+        rule_readiness["competitor"] = {
+            "status": "degraded",
+            "reason": "没有已确认的竞品匹配，无法做价格与套餐对比（请先在竞品匹配里人工确认）",
         }
 
     # 4) 逾期任务 → 升级复核草稿
@@ -250,6 +346,8 @@ def build_snapshot(
         },
         "packages": packages,
         "overdue_staff_tasks": overdue_tasks,
+        "ops": ops_payload,
+        "competitor": competitor_payload,
         "rules": {
             "negative_review_sla_hours": int(rules.get("negative_review_sla_hours", 4)),
             "package_conversion_floor": float(rules.get("package_conversion_floor", 0.05)),
@@ -258,7 +356,8 @@ def build_snapshot(
         },
         "_meta": {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "source": "sqlite(platform_metrics/package_metrics/reviews) + store_config.json",
+            "source": "platform_metrics/package_metrics/reviews + "
+                      "store_traffic_daily/time_slot_metrics/inventory_items + store_config.json",
             "cycle": {"start": cycle_start.isoformat(), "end": cycle_end.isoformat(), "target_qualified": target_qualified},
             "package_window": {"start": package_start.isoformat(), "end": day_iso, "days": PACKAGE_WINDOW_DAYS},
             "counts": {
@@ -268,6 +367,11 @@ def build_snapshot(
                 "open_negatives": len(negative_items),
                 "packages": len(packages),
                 "overdue_tasks": len(overdue_tasks),
+                "ops_time_slots": len(ops_payload["time_slots"]),
+                "ops_low_slots": len(ops_payload["low_slots"]),
+                "ops_inventory_alerts": len(ops_payload["inventory_alerts"]),
+                "competitor_areas": len(competitor_payload.get("by_area") or []),
+                "competitor_matches": len(competitor_payload.get("packages", {}).get("matches") or []),
             },
             "rule_readiness": rule_readiness,
             "notes": notes,

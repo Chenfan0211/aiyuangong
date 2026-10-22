@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import pg_sync
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -30,8 +32,15 @@ LANDED_TABLES = {
     "action_tasks", "task_evidence", "task_events", "users", "memberships", "auth_sessions",
     "login_attempts", "audit_events", "agent_sessions", "agent_messages",
     "approvals", "agent_tool_runs", "notifications",
+    # 第 1 期：门店侧经营数据
+    "store_traffic_daily", "time_slot_metrics", "inventory_items", "inventory_alerts",
+    "trade_areas", "ops_import_batches",
+    # 第 2 期：竞品监控
+    "competitor_stores", "competitor_offers", "competitor_matches",
+    # 第 3 期：规则库（原"B. 规划中"转正）
+    "action_rules",
 }
-PLANNED_TABLES = {"connector_accounts", "ingestion_runs", "metric_facts_daily", "offers", "action_rules"}
+PLANNED_TABLES = {"connector_accounts", "ingestion_runs", "metric_facts_daily", "offers"}
 TENANT_SCOPED = LANDED_TABLES - {"login_attempts"}
 
 
@@ -207,6 +216,27 @@ class PgMigrationTests(unittest.TestCase):
         self.run_sync("init")
         result = self.run_sync("--only", "platform_metrics", "etl")   # 全局参数写在子命令之前
         self.assertEqual(result.returncode, 0, result.stderr[-500:])
+
+
+class OutcomeTablesTests(unittest.TestCase):
+    """第 3 期第 5 步：task_feedback / task_outcomes 收口进权威模型。"""
+
+    def test_tables_are_registered_in_authoritative_model(self):
+        names = {spec.name for spec in pg_sync.TABLES}
+        self.assertIn("task_feedback", names)
+        self.assertIn("task_outcomes", names)
+
+    def test_schema_section_a_creates_outcome_tables(self):
+        joined = "\n".join(pg_sync.read_schema_section_a()).lower()
+        self.assertIn("create table if not exists task_feedback", joined)
+        self.assertIn("create table if not exists task_outcomes", joined)
+
+    def test_outcome_tables_migration_lands_them(self):
+        latest = next(item for item in pg_sync.MIGRATIONS
+                      if item.name == "task_outcome_tables_landing")
+        landed = {name.lower() for name in pg_sync.tables_in_statements(latest.statements)}
+        self.assertEqual(landed, {"task_feedback", "task_outcomes"})
+        self.assertEqual(set(latest.requires_tables), {"task_feedback", "task_outcomes"})
 
 
 if __name__ == "__main__":

@@ -48,7 +48,12 @@ from retention import plan_purge, policy_from_config, purge as purge_retention
 from security import gate_report
 
 from platform_data import PlatformMetricStore
+from store_ops_data import StoreOpsDataStore
 from prototype import generate_daily_plan
+from rule_seed import resolve_runtime_rules, seed_builtin_rules
+from rule_store import RuleStore
+from rule_outcomes import RuleOutcomeStore
+from outcome_tracker import OutcomeTracker
 from snapshot_builder import SnapshotError, build_snapshot, load_config
 from task_store import TaskStore, TaskStoreError
 
@@ -185,6 +190,12 @@ def build_parser() -> argparse.ArgumentParser:
     auth_audit = sub.add_parser("auth-audit", help="查看身份与权限相关审计事件")
     auth_audit.add_argument("--limit", type=int, default=30)
     auth_audit.add_argument("--event-type", default=None)
+    rules_seed = sub.add_parser("rules-seed", help="把内置规则写入规则库（默认只建 draft，--approve 才生效）")
+    rules_seed.add_argument("--approve", action="store_true",
+                            help="把新建的内置规则直接审批为 approved（记为 system:builtin-seed）")
+    rules_outcomes = sub.add_parser(
+        "rules-outcomes", help="按规则版本计算效果归因与调参提案（只写提案，不改规则）")
+    rules_outcomes.add_argument("--window-days", type=int, default=7, help="结果窗口天数（默认 7）")
     return parser
 
 
@@ -231,15 +242,44 @@ def main() -> None:
         store_id = str(config.get("store_id") or "")
         tenant_id = str(config.get("tenant_id") or "")
         metrics = PlatformMetricStore(args.metrics_db, tenant_id=tenant_id)
+        ops = StoreOpsDataStore(args.store_db, tenant_id=tenant_id)
         task_store = TaskStore(args.store_db, tenant_id=tenant_id)
         approvals = ApprovalStore(args.store_db, tenant_id=tenant_id)
 
+        if args.command == "rules-outcomes":
+            rule_store = RuleStore(args.store_db, tenant_id=tenant_id)
+            rules = {item["rule_key"]: item for item in rule_store.approved_rules()}
+            engine = RuleOutcomeStore(args.store_db, tenant_id=tenant_id)
+            tracker = OutcomeTracker(args.store_db, tenant_id=tenant_id)
+            result = engine.compute(store_id, task_store=task_store, outcome_tracker=tracker,
+                                    rules=rules, window_days=args.window_days)
+            print(json.dumps({"store_id": store_id, "window_days": result["window_days"],
+                              "rule_count": result["rule_count"], "computed": result["computed"]},
+                             ensure_ascii=True, indent=2))
+            return
+
+        if args.command == "rules-seed":
+            rule_store = RuleStore(args.store_db, tenant_id=tenant_id)
+            result = seed_builtin_rules(rule_store, store_id, config, approve=args.approve)
+            print(json.dumps({"store_id": store_id, **result}, ensure_ascii=True, indent=2))
+            return
+
         if args.command == "snapshot":
-            payload = build_snapshot(config, metrics, args.date, task_store=task_store)
+            payload = build_snapshot(config, metrics, args.date, task_store=task_store, ops_store=ops)
         elif args.command == "plan":
-            snapshot = build_snapshot(config, metrics, args.date, task_store=task_store)
+            snapshot = build_snapshot(config, metrics, args.date, task_store=task_store, ops_store=ops)
             marked = task_store.mark_overdue(store_id)
-            plan = generate_daily_plan(snapshot, allow_degraded=args.allow_degraded)
+            active_rules, missing_rules = resolve_runtime_rules(
+                RuleStore(args.store_db, tenant_id=tenant_id))
+            plan = generate_daily_plan(snapshot, allow_degraded=args.allow_degraded,
+                                       rules=active_rules)
+            if active_rules is None:
+                print(f"规则库未就绪（缺少已批准规则：{'、'.join(missing_rules)}），已回退内置默认规则",
+                      file=sys.stderr)
+                AuthStore(args.store_db, tenant_id=tenant_id).record_audit(
+                    event_type="plan_rule_fallback", actor_type="system", actor_id="rule_runtime",
+                    tenant_id=tenant_id, store_id=store_id, object_type="plan",
+                    object_id=plan["date"], after={"missing_rules": missing_rules})
             if args.allow_degraded:
                 AuthStore(args.store_db, tenant_id=tenant_id).record_audit(
                     event_type="plan_allow_degraded", actor_type="user", actor_id=args.by,

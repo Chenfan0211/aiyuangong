@@ -26,6 +26,23 @@ from snapshot_builder import load_config, parse_target_date
 RULE_VERSION = "1.0"
 DIAGNOSIS_RULE_VERSION = "1.0"
 
+# 第 3 期第 5 步：分析类规则的版本号优先读规则库（approved 版本），读不到才回退上面的代码常量。
+ANALYSIS_RULE_KEYS = (("period_comparison", RULE_VERSION), ("store_diagnosis", DIAGNOSIS_RULE_VERSION))
+
+
+def load_rule_versions(rule_store: Any) -> dict[str, str]:
+    """解析分析类规则的生效版本号：只采纳 approved 版本，缺失或异常一律回退代码常量。"""
+    versions: dict[str, str] = {}
+    for key, fallback in ANALYSIS_RULE_KEYS:
+        record = None
+        if rule_store is not None:
+            try:
+                record = rule_store.get_rule(key)
+            except Exception:
+                record = None      # 规则库不可用时不能阻断分析，回退代码常量
+        versions[key] = str(record.get("version")) if record and record.get("status") == "approved" else fallback
+    return versions
+
 WINDOW_DAYS = {"day": 1, "week": 7}
 WINDOW_LABELS = {"day": "日", "week": "近 7 天"}
 FINANCIAL_KEYS = ("gmv", "refunds", "refund_rate")
@@ -162,7 +179,8 @@ class StoreAnalysis:
     ``config`` 可以是门店配置 dict，也可以是 store_config.json 路径（内部走 load_config）。
     """
 
-    def __init__(self, config: Any, metric_store: PlatformMetricStore, config_path: Optional[Path] = None):
+    def __init__(self, config: Any, metric_store: PlatformMetricStore, config_path: Optional[Path] = None,
+                 rule_store: Any = None):
         if isinstance(config, (str, Path)):
             path = Path(config)
             config = load_config(path)
@@ -177,6 +195,7 @@ class StoreAnalysis:
         rules = self.config.get("rules") or {}
         self.fresh_days = int(rules.get("fresh_days", 2))
         self.jump_alert_percent = float(rules.get("jump_alert_percent", 30.0))
+        self.rule_versions = load_rule_versions(rule_store)
 
     # ---------------- 周期对比 ----------------
 
@@ -427,8 +446,9 @@ class StoreAnalysis:
                 "label": f"导入批次 #{batch['id']}（{batch['dataset_label']}·{batch['source_name']}）",
                 "date_range": {"start": batch["min_date"], "end": batch["max_date"]},
             })
-        sources.append({"type": "rule", "rule_key": "period_comparison", "version": RULE_VERSION,
-                        "label": f"周期对比规则 v{RULE_VERSION}"})
+        period_version = self.rule_versions["period_comparison"]
+        sources.append({"type": "rule", "rule_key": "period_comparison", "version": period_version,
+                        "label": f"周期对比规则 v{period_version}"})
         if self.config_path:
             sources.append({"type": "store_config", "label": f"门店配置 {self.config_path.name}",
                             "path": str(self.config_path)})
@@ -597,13 +617,14 @@ class StoreAnalysis:
             causes = [{**item, "confidence": "medium" if item.get("confidence") == "high" else item.get("confidence")}
                       for item in causes]
         sources = list(comparison.get("sources") or [])
-        sources.append({"type": "rule", "rule_key": "store_diagnosis", "version": DIAGNOSIS_RULE_VERSION,
-                        "label": f"经营归因规则 v{DIAGNOSIS_RULE_VERSION}"})
+        diagnosis_version = self.rule_versions["store_diagnosis"]
+        sources.append({"type": "rule", "rule_key": "store_diagnosis", "version": diagnosis_version,
+                        "label": f"经营归因规则 v{diagnosis_version}"})
         return {
             "store_id": comparison.get("store_id") or self.store_id,
             "anchor": comparison.get("anchor"),
             "window": window_key,
-            "rule_version": DIAGNOSIS_RULE_VERSION,
+            "rule_version": diagnosis_version,
             "causes": causes,
             "blocked": blocked,
             "caveats": caveats,

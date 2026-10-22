@@ -122,6 +122,49 @@
       return payload;
     }
 
+    async streamJson(path, body, onEvent) {
+      // SSE 读取器必须放在共享客户端里：4 个页面脚本被契约测试禁止出现 fetch(。
+      const response = await this.request(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify(body === undefined ? {} : body)
+      });
+      if (!response.ok || !response.body) {
+        const payload = await readPayload(response);
+        throw new SessionError(payload.detail || payload.error || ('HTTP ' + response.status), {
+          status: response.status,
+          payload,
+          method: 'POST',
+          url: path
+        });
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      const handle = (line) => {
+        const value = String(line).trim();
+        if (!value.startsWith('data:')) return;
+        const raw = value.slice(5).trim();
+        if (!raw || raw === '[DONE]') return;
+        let event = null;
+        try {
+          event = JSON.parse(raw);
+        } catch (_error) {
+          return;
+        }
+        if (typeof onEvent === 'function') onEvent(event);
+      };
+      let buffer = '';
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const parts = buffer.split('\n');
+        buffer = parts.pop() || '';
+        parts.forEach(handle);
+      }
+      if (buffer) handle(buffer);
+    }
+
     getJson(path, options) {
       return this.json(path, { ...(options || {}), method: 'GET' });
     }

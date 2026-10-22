@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import sqlite3
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -47,7 +48,51 @@ DEMO_USERS = {
     },
 }
 
-HIGH_RISK_TERMS = ("改价", "降价", "赔付", "赔偿", "警告", "处罚", "罚款", "奖惩", "发布", "上架")
+# 高风险动作：只有"既提到风险对象、又表达了执行诉求、且不是在提问"才拦。
+# 旧写法是"提及即拦"，导致"同商圈竞品有没有降价"被当成要改价（见第 11 期实证）。
+RISK_OBJECTS = ("价", "价格", "赔付", "赔偿", "补偿", "赔", "警告", "处罚", "罚款", "处分",
+                "奖惩", "发布", "上架", "回复")
+# 注："回复"要单独列出：只写"公开回复"会让"帮我把这条差评回复掉"漏过闸门，
+# 而"差评怎么回复"因为带疑问标记仍然放行——这正是本期实证要求的那一对。
+RISK_ACTIONS = ("帮我", "给我", "替我", "把", "将", "下调", "上调", "改成", "改为", "调整",
+                "执行", "下发", "发布", "上架", "回复掉", "处理掉", "马上", "立刻", "立即",
+                "给他", "给她", "给顾客")
+# 另一件事：判断**一条建议的内容**是否涉及需要审批的高风险动作
+# （用在 advice 的 approval_required 上，与"用户是否在要求执行"不是同一判定）。
+HIGH_RISK_ACTION_TERMS = ("改价", "降价", "赔付", "赔偿", "警告", "处罚", "罚款", "奖惩",
+                          "发布", "上架")
+QUESTION_MARKERS = ("吗", "呢", "?", "？", "怎么", "如何", "为什么", "能不能", "可不可以",
+                    "是否", "有没有", "该不该", "多少", "哪些", "哪个", "什么", "啥")
+
+
+def is_high_risk_request(text: str) -> bool:
+    """三个条件同时成立才算"要求执行高风险动作"：风险对象 ∩ 动作表达 ∩ 非提问。
+
+    这是**尽力而为的规则闸门**：中文里动作与对象会重叠（"上架"既是动作也是对象）、
+    表达方式也无穷（"给他赔 50 元"）。它只是第一道防线，第二道是模型侧的 system 提示
+    （禁止输出可执行的高风险指令），第三道是写操作永远只出草稿。
+    误拦的代价是"多问一句"，漏拦的代价由后两道兜住。
+    """
+    return (any(term in text for term in RISK_OBJECTS)
+            and any(term in text for term in RISK_ACTIONS)
+            and not any(mark in text for mark in QUESTION_MARKERS))
+
+
+# 兜底引导：未命中任何能力时，按用户问到的主题给出"怎么才能答"的可操作指引，
+# 而不是回一段与问题无关的固定能力清单。
+TOPIC_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("库存", "物料", "补货", "断货", "物料预警"),
+     "库存与物料：把盘点结果放进收件箱（import-inventory 或 import-dir）导入后，"
+     "我可以报出未处理的库存预警与要不要补货。"),
+    (("时段", "翻台", "客流", "午市", "晚市", "高峰期"),
+     "时段与客流：导入「时段分布」「开台与客流」两类报表后，我能报出各时段的订单占比与翻台率。"),
+    (("竞品", "对手", "同行", "同商圈", "别人家", "隔壁"),
+     "竞品：采样台账（竞品门店 + 采样明细）导入后，我可以报已确认的匹配和尚未匹配的竞品套餐。"),
+    (("手册", "规范", "制度", "知识库", "文档"),
+     "门店手册与制度类问答属于知识库能力，当前还不能按文档回答。"),
+    (("排班", "考勤", "工资", "薪资"),
+     "排班、考勤与工资不在当前能力范围内。"),
+)
 SENSITIVE_TERMS = ("毛利", "利润", "工资", "薪资", "老板报表", "全店员工", "奖惩记录")
 
 
@@ -65,6 +110,8 @@ INTENT_RULES: tuple[IntentRule, ...] = (
     IntentRule("store_diagnosis", (
         "为什么订单", "为什么曝光", "为什么访问", "为什么下降", "为什么上涨", "为什么掉",
         "下降原因", "上涨原因", "原因分析", "经营诊断", "归因",
+        "订单少", "订单下滑", "订单下降", "销量下降", "业绩下降", "生意变差", "生意差",
+        "客流下降", "客流少", "涨不上去", "越来越差",
     ), "经营变化归因"),
     IntentRule("task_help", (
         "任务详情", "这个任务", "这些任务具体", "任务具体", "任务目标", "任务要求",
@@ -79,7 +126,9 @@ INTENT_RULES: tuple[IntentRule, ...] = (
     IntentRule("data_gap", ("哪天缺数", "缺哪几天", "哪天没数据", "哪些天没数据", "缺数日期"), "缺日明细"),
     IntentRule("data_quality", ("数据齐不齐", "数据质量", "数据全不全", "缺不缺数", "数据完不完整"), "数据质量体检"),
     IntentRule("task_progress", ("任务完成情况", "完成情况", "完成率", "完成了多少"), "任务执行统计"),
-    IntentRule("explain_tasks", ("为什么", "原因", "依据"), "解释任务生成依据"),
+    IntentRule("explain_tasks", (
+        "任务为什么", "为什么生成", "生成依据", "任务依据", "派单依据", "任务的原因",
+    ), "解释任务生成依据"),
     IntentRule("execution_help", ("怎么做", "流程", "步骤", "证据", "完成了", "做完了"), "执行 SOP"),
     IntentRule("reputation_help", ("差评", "评价", "口碑"), "评价与差评处理"),
     IntentRule("package_help", ("套餐", "转化", "团购"), "套餐诊断"),
@@ -161,6 +210,35 @@ DEFAULT_TASK_STEPS = (
 )
 
 
+def load_env_file(path: Optional[Path] = None) -> int:
+    """把仓库根目录的 `.env` 填进环境变量（**只填空，不覆盖已有值**）。
+
+    `.env` 已在 .gitignore / .dockerignore 中排除；直接 `python app_fastapi.py` 启动时
+    不会自动读取它，部署侧读的是 `.env.production`。这里补上，让"Key 放 .env 即生效"成立。
+    返回实际注入的变量个数。
+    """
+    # 测试环境绝不加载本地 .env：否则开发者本机的真实 Key 会被测试捡到，
+    # 造成"测试依赖外部模型 / 产生真实费用 / 结果不确定"。显式置
+    # STORE_AGENT_DISABLE_DOTENV=1 也能关掉（供其它测试框架使用）。
+    if os.environ.get("STORE_AGENT_DISABLE_DOTENV") or "unittest" in sys.modules:
+        return 0
+    target = Path(path) if path else Path(__file__).resolve().parent / ".env"
+    if not target.is_file():
+        return 0
+    filled = 0
+    for raw in target.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        value = value.strip().strip('"').strip("'")
+        if name and value and not os.environ.get(name):
+            os.environ[name] = value
+            filled += 1
+    return filled
+
+
 class OpenAICompatibleResponder:
     """可选的大模型兜底；只接收服务端裁剪后的最小上下文。"""
 
@@ -172,6 +250,7 @@ class OpenAICompatibleResponder:
 
     @classmethod
     def from_environment(cls) -> Optional["OpenAICompatibleResponder"]:
+        load_env_file()
         api_key = os.getenv("STORE_AGENT_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             return None
@@ -544,7 +623,7 @@ class StoreOperationsAgent:
                     "owner_role": self._advice_owner_role(code),
                     "evidence": self._advice_evidence(code),
                     "metric": self._advice_metric_label(cause),
-                    "approval_required": any(term in text for term in HIGH_RISK_TERMS),
+                    "approval_required": any(term in text for term in HIGH_RISK_ACTION_TERMS),
                 })
             if len(actions) >= 3:
                 break
@@ -647,6 +726,26 @@ class StoreOperationsAgent:
             if any(keyword in text for keyword in rule.keywords):
                 return rule.intent
         return None
+
+    def _fallback_guidance(self, user: dict[str, Any], text: str) -> str:
+        """未命中任何能力时的兜底：按用户问到的**主题**给出可操作指引。
+
+        旧的兜底是一段固定的能力清单，与用户实际问的东西无关；这里改为
+        先看问的是哪一类（库存 / 时段 / 竞品 / 手册 / 排班），再说明要怎样才能答。
+        """
+        hints = [hint for keywords, hint in TOPIC_HINTS
+                 if any(keyword in text for keyword in keywords)]
+        lines = [f"{user['name']}，我没有完全确定你在问哪一类信息。"]
+        if hints:
+            lines.append("")
+            lines.extend(f"- {hint}" for hint in hints)
+        lines.append("")
+        lines.append(
+            "我现在能直接回答的：今日任务、某项任务为什么生成、任务完成率与逾期、"
+            "数据齐不齐与缺哪几天、经营周期对比与归因、差评处理流程、套餐转化，以及生成店长日报。"
+        )
+        lines.append("配置大模型后，可以直接用日常说法提问（含开台/客流、时段、库存与竞品）。")
+        return "\n".join(lines)
 
     def _default_sources(self) -> list[Any]:
         if self.tools is not None:
@@ -1068,6 +1167,80 @@ class StoreOperationsAgent:
 
     # ---------------- 主入口 ----------------
 
+    def reply_stream(
+        self,
+        message: str,
+        user_id: str,
+        history: Optional[list[dict[str, Any]]] = None,
+        user: Optional[dict[str, Any]] = None,
+    ):
+        """流式版 `reply()`：逐个 yield 事件，供 SSE 使用。
+
+        - **安全闸门与无模型路径不流式**：它们本来就瞬时产出，直接复用 `reply()` 的结果，
+          一次性发 `delta` + `done`（前端只有一条代码路径）。
+        - **模型路径真流式**：边调工具边出字；模型失败时降级回规则/兜底并标记 `degraded`。
+        """
+        user = user or self.user(user_id)
+        text = " ".join(message.strip().split())
+        if not text:
+            raise ValueError("消息不能为空")
+        gated = (not self._can(user, "metrics:read:financial")
+                 and any(term in text for term in SENSITIVE_TERMS)) or is_high_risk_request(text)
+
+        def _rule_events(result: dict[str, Any], degraded: bool = False):
+            yield {"type": "delta", "text": result["answer"]}
+            # mode 描述的是"这次答案是谁产出的"，不是"是否配了模型"：
+            # 安全闸门与规则层产出的答案必须报 rules，否则前端会误标成模型回答。
+            yield {"type": "done", "text": result["answer"], "intent": result["intent"],
+                   "sources": result["sources"],
+                   "mode": "rules",
+                   "llm_enabled": result["llm_enabled"], "degraded": degraded,
+                   "requires_approval": result["requires_approval"],
+                   "advice": result.get("advice")}
+
+        if gated or self.tool_agent is None:
+            yield from _rule_events(self.reply(message, user_id, history=history, user=user))
+            return
+
+        yield {"type": "status", "text": "正在理解你的问题…"}
+        final: Optional[dict[str, Any]] = None
+        streamed = False
+        for event in self.tool_agent.answer_stream(text, user, history or []):
+            if event["type"] == "delta":
+                streamed = True
+                yield event
+            elif event["type"] == "status":
+                yield event
+            elif event["type"] == "error":
+                # 已经吐出过内容就不能假装没发生：如实标记降级并收尾。
+                if streamed:
+                    yield {"type": "done", "text": "", "intent": "llm_unavailable",
+                           "sources": event.get("sources") or [], "mode": "tools",
+                           "llm_enabled": True, "degraded": True,
+                           "requires_approval": False, "advice": None}
+                else:
+                    fallback = self.reply(message, user_id, history=history, user=user)
+                    yield from _rule_events(fallback, degraded=True)
+                return
+            else:
+                final = event
+
+        if final is None:
+            yield {"type": "done", "text": "", "intent": "llm_unavailable",
+                   "sources": [], "mode": "tools", "llm_enabled": True, "degraded": True,
+                   "requires_approval": False, "advice": None}
+            return
+        calls = final.get("calls") or []
+        answer = str(final.get("text") or "")
+        if calls:
+            used = "、".join(sorted({call["name"] for call in calls}))
+            answer += f"\n\n（依据：调用了 {used}；共 {final.get('iterations')} 轮）"
+            yield {"type": "delta", "text": f"\n\n（依据：调用了 {used}；共 {final.get('iterations')} 轮）"}
+        yield {"type": "done", "text": answer, "intent": "llm_tools",
+               "sources": list(final.get("sources") or []) + self._default_sources(),
+               "mode": "tools", "llm_enabled": True, "degraded": False,
+               "requires_approval": False, "advice": None}
+
     def reply(
         self,
         message: str,
@@ -1086,6 +1259,11 @@ class StoreOperationsAgent:
         sources = self._default_sources()
         requires_approval = False
         advice: Optional[dict[str, Any]] = None
+        # 这三个在三个分支里都会用到（权限拦截 / 高风险诉求 / 正常作答），
+        # 必须在这里初始化：否则高风险分支走到函数末尾会 UnboundLocalError。
+        handled = False
+        keyword_intent = ""
+        intent = ""
 
         if not self._can(user, "metrics:read:financial") and any(term in text for term in SENSITIVE_TERMS):
             intent = "permission_denied"
@@ -1094,7 +1272,7 @@ class StoreOperationsAgent:
                 "你可以问自己的任务、操作步骤、差评接待流程和如何提交完成证据。"
             )
             sources = ["角色权限策略 v1"]
-        elif any(term in text for term in HIGH_RISK_TERMS):
+        elif is_high_risk_request(text):
             intent = "approval_required"
             requires_approval = True
             answer = (
@@ -1103,70 +1281,78 @@ class StoreOperationsAgent:
             )
             sources = ["高风险动作审批策略 v1"]
         else:
-            intent = self.match_intent(text) or ""
             days = int(slots["days"])
-            if intent == "task_help":
-                answer, sources, advice = self._answer_task_help(user, text)
-            elif intent == "advice":
-                answer, sources, advice = self._answer_advice(user, slots)
-            elif intent == "platform_metrics":
-                answer, sources = self._answer_platform_metrics(user, slots)
-            elif intent == "period_comparison":
-                answer, sources = self._answer_period_comparison(user, slots)
-            elif intent == "store_diagnosis":
-                answer, sources, advice = self._answer_store_diagnosis(user, slots)
-            elif intent == "daily_report":
-                answer, sources = self._answer_daily_report(user)
-            elif intent == "data_quality":
-                answer, sources = self._answer_data_quality(user, days=30 if days == 7 else days)
-            elif intent == "data_gap":
-                answer, sources = self._answer_data_gap(user)
-            elif intent == "task_progress":
-                answer, sources = self._answer_task_progress(user)
-            elif intent == "list_tasks":
-                answer, sources = self._answer_list_tasks(user)
-            elif intent == "reputation_help":
-                answer, sources = self._answer_reputation_help(user)
-            elif intent == "package_help":
-                answer, sources = self._answer_package_help(user)
-            elif intent == "execution_help":
-                answer, sources = self._answer_execution_help()
-            elif intent == "explain_tasks":
-                answer, sources = self._answer_explain_tasks(user)
-            elif self.tool_agent is not None:
+            # 第 11 期：有模型就模型优先。旧顺序把关键词层排在模型之前，而关键词是
+            # "包含匹配"，导致配了 Key 也轮不到模型理解自由提问（见本期"根因与实证"）。
+            if self.tool_agent is not None:
                 try:
-                    intent = "llm_tools"
                     outcome = self.tool_agent.answer(text, user, history or [])
                     answer = outcome["answer"]
                     if outcome.get("calls"):
                         used = "、".join(sorted({call["name"] for call in outcome["calls"]}))
                         answer += f"\n\n（依据：调用了 {used}；共 {outcome['iterations']} 轮）"
                     sources = list(outcome.get("sources") or []) + self._default_sources()
-                except Exception:                                   # noqa: BLE001 - 模型不可用要降级
+                    intent = "llm_tools"
+                    handled = True
+                except Exception:                    # noqa: BLE001 - 模型不可用必须降级，不能抛给用户
                     intent = "llm_unavailable"
-                    answer = "大模型暂时不可用。我仍可回答今日任务、任务依据、差评流程、套餐反馈和完成证据。"
-                    sources = ["Agent 降级策略 v1"]
-            elif self.llm_responder:
+            elif self.llm_responder is not None:
                 try:
-                    intent = "llm_conversation"
                     answer = self.llm_responder.answer(text, user, visible, history or [])
                     sources = [{"type": "llm", "label": "大模型基于当前用户可见上下文生成"}]
-                except Exception:
+                    intent = "llm_conversation"
+                    handled = True
+                except Exception:                    # noqa: BLE001
                     intent = "llm_unavailable"
-                    answer = "大模型暂时不可用。我仍可回答今日任务、任务依据、差评流程、套餐反馈和完成证据。"
-                    sources = ["Agent 降级策略 v1"]
+            keyword_intent = "" if handled else (self.match_intent(text) or "")
+            if handled:
+                pass
+            elif keyword_intent == "task_help":
+                answer, sources, advice = self._answer_task_help(user, text)
+            elif keyword_intent == "advice":
+                answer, sources, advice = self._answer_advice(user, slots)
+            elif keyword_intent == "platform_metrics":
+                answer, sources = self._answer_platform_metrics(user, slots)
+            elif keyword_intent == "period_comparison":
+                answer, sources = self._answer_period_comparison(user, slots)
+            elif keyword_intent == "store_diagnosis":
+                answer, sources, advice = self._answer_store_diagnosis(user, slots)
+            elif keyword_intent == "daily_report":
+                answer, sources = self._answer_daily_report(user)
+            elif keyword_intent == "data_quality":
+                answer, sources = self._answer_data_quality(user, days=30 if days == 7 else days)
+            elif keyword_intent == "data_gap":
+                answer, sources = self._answer_data_gap(user)
+            elif keyword_intent == "task_progress":
+                answer, sources = self._answer_task_progress(user)
+            elif keyword_intent == "list_tasks":
+                answer, sources = self._answer_list_tasks(user)
+            elif keyword_intent == "reputation_help":
+                answer, sources = self._answer_reputation_help(user)
+            elif keyword_intent == "package_help":
+                answer, sources = self._answer_package_help(user)
+            elif keyword_intent == "execution_help":
+                answer, sources = self._answer_execution_help()
+            elif keyword_intent == "explain_tasks":
+                answer, sources = self._answer_explain_tasks(user)
             else:
-                intent = "capability_help"
-                answer = (
-                    f"你好，{user['name']}。我是武汉狮子座店的门店运营 Agent。"
-                    "你可以问我：今天做什么、某项任务为什么生成、差评怎么处理、套餐问题怎么反馈、"
-                    "任务完成需要什么证据、数据齐不齐、生成今日日报。"
-                    "配置大模型后还可进行开放式门店运营交流。"
-                )
+                # 关键词也没命中 → 不再回一段与问题无关的固定清单，
+                # 而是识别用户问到的主题，告诉他"要怎样才能答这个问题"。
+                if not handled and intent != "llm_unavailable":
+                    intent = "capability_help"
+                answer = self._fallback_guidance(user, text)
+                sources = ["Agent 兜底引导 v1"]
+
+        # 注意顺序：degraded 必须在 intent 被关键词覆盖之前算出来，
+        # 否则"模型挂了但关键词答上了"会被当成正常作答（第 11 期修）。
+        degraded = intent == "llm_unavailable"
+        if not handled and keyword_intent:
+            intent = keyword_intent
 
         return {
             "answer": answer,
             "intent": intent,
+            "degraded": degraded,
             "user": user,
             "store": self.snapshot["store"],
             "sources": sources,

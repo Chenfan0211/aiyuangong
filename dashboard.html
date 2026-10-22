@@ -31,12 +31,24 @@
         <h2>套餐表现 <span>按支付订单排序，毛利率来自门店配置</span></h2>
         <table><thead><tr><th>套餐</th><th>平台</th><th>访客</th><th>支付</th><th>转化率</th><th>毛利率</th></tr></thead>
           <tbody id="packages"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table>
+        <h2>时段分布 <span id="slotsHint">按订单占比</span>
+          <label class="cardtoggle"><input type="checkbox" id="showSlots" /> 显示</label></h2>
+        <div id="slotsCard" hidden>
+          <table><thead><tr><th>时段</th><th>天数</th><th>客流</th><th>订单</th><th>订单占比</th></tr></thead>
+            <tbody id="timeSlots"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table>
+        </div>
       </div>
       <div>
         <h2>数据状态 <span>新鲜度与完整性</span></h2>
         <table><tbody id="quality"><tr><td class="empty">加载中…</td></tr></tbody></table>
         <h2>任务与审批 <span>近 7 天</span></h2>
         <table><tbody id="tasks"><tr><td class="empty">加载中…</td></tr></tbody></table>
+        <h2>库存预警 <span id="stockHint">低于安全库存的物料</span>
+          <label class="cardtoggle"><input type="checkbox" id="showStock" /> 显示</label></h2>
+        <div id="stockCard" hidden>
+          <table><thead><tr><th>物料</th><th>剩余</th><th>安全库存</th><th>级别</th></tr></thead>
+            <tbody id="inventoryAlerts"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody></table>
+        </div>
         <h2>需要关注 <span>由数据质量与执行状态自动汇总</span></h2>
         <ul class="issues" id="issues"><li class="empty">加载中…</li></ul>
         <h2>报告输出 <span>周报 / 月报（可复制）</span></h2>

@@ -96,8 +96,9 @@ class PolicyTests(Base):
         result = check_retention_policy(ROOT / "store_config.json")
         self.assertTrue(result["ok"], result["problems"])
         self.assertGreater(result["tables_with_expiry"], 10)
+        # trade_areas 是商圈主数据；competitor_stores / competitor_matches 是竞品主数据，同样永久保留
         self.assertEqual(sorted(result["forever_tables"]),
-                         ["memberships", "store_configs", "stores", "users"])
+                         ['capabilities', 'capability_bindings', 'competitor_matches', 'competitor_stores', 'digital_employees', 'inspection_items', 'inspection_templates', 'knowledge_bases', 'knowledge_chunks', 'knowledge_documents', 'memberships', 'sop_versions', 'sops', 'store_configs', 'stores', 'team_members', 'teams', 'tool_credentials', 'tool_instances', 'tool_templates', 'trade_areas', 'users'])
         self.assertEqual(policy_from_config(config)["reviews"], 180)
 
 
@@ -127,8 +128,15 @@ class PlanTests(Base):
         self.assertTrue(all(plan.rows == 0 for plan in plans))
         skipped = [plan.table for plan in plans if plan.action == "skip"]
         self.assertIn("platform_metrics", skipped)                       # 有期限但表不存在
-        self.assertEqual([plan.table for plan in plans if plan.action == "keep"],
-                         ["users", "memberships", "stores", "store_configs"])
+        self.assertEqual({plan.table for plan in plans if plan.action == "keep"},
+                         {"trade_areas", "competitor_stores", "competitor_matches",
+                          "users", "memberships", "stores", "store_configs",
+                          "inspection_templates", "inspection_items",
+                          "capabilities", "capability_bindings",
+                          "knowledge_bases", "knowledge_chunks", "knowledge_documents",
+                          "sops", "sop_versions",
+                          "tool_templates", "tool_instances", "tool_credentials",
+                          "digital_employees", "teams", "team_members"})
 
 
 class PurgeTests(Base):

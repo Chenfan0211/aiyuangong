@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """平台数据导入、数据状态与摘要命令行。
 
-支持三类数据集，由 `import-dir` 按表头自动识别：
+`import-dir` 按表头自动识别两类来源、共七种数据集，可混放在同一个收件箱：
 
-  1. 平台日指标：date,platform,store_id + 9 个指标
-  2. 套餐明细：  date,platform,store_id,package_id,package_name + 4 个指标
-  3. 评价明细：  review_id,platform,store_id,rating,created_at,status,category,replied_at
+  平台侧（写平台指标库 --db）：
+    1. 平台日指标：date,platform,store_id + 9 个指标
+    2. 套餐明细：  date,platform,store_id,package_id,package_name + 4 个指标
+    3. 评价明细：  review_id,platform,store_id,rating,created_at,status,category,replied_at
+
+  门店侧（写门店侧数据库 --store-db）：
+    4. 开台与客流：date,store_id,tables_opened,table_capacity,covers,revenue
+    5. 时段分布：  date,store_id,slot,covers,orders,revenue
+    6. 库存与物料：date,store_id,item_id,name,unit,quantity,safety_stock
+    7. 商圈：      store_id,area_id,area_name,area_type,note
+
+  竞品（写门店侧库 --store-db，第 2 期）：
+    8. 竞品门店：  store_id,competitor_id,competitor_name,area_id（可选 note）
+    9. 竞品采样：  date,store_id,competitor_id,package_name,price
+                  + 必填 sampled_by,source_method,source_note（合规留痕）
+                  + 可选 activity,activity_note
 
 日常用法（把平台后台导出的 CSV 放进 imports/inbox/ 后执行一条命令）：
 
@@ -25,6 +38,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from platform_data import DataValidationError, PlatformMetricStore
+from competitor import CompetitorStore
+from store_ops_data import StoreOpsDataStore, import_inbox
 from registry import RegistryStore
 from snapshot_builder import load_config
 
@@ -58,6 +73,26 @@ def build_parser() -> argparse.ArgumentParser:
     import_reviews = sub.add_parser("import-reviews", parents=[common], help="导入单条评价明细 CSV")
     import_reviews.add_argument("path", type=Path)
 
+    import_traffic = sub.add_parser("import-traffic", parents=[common], help="导入门店开台与客流 CSV")
+    import_traffic.add_argument("path", type=Path)
+    import_timeslot = sub.add_parser("import-timeslot", parents=[common], help="导入门店时段分布 CSV")
+    import_timeslot.add_argument("path", type=Path)
+    import_inventory = sub.add_parser("import-inventory", parents=[common], help="导入门店库存与物料 CSV")
+    import_inventory.add_argument("path", type=Path)
+    import_trade_area = sub.add_parser("import-trade-area", parents=[common], help="导入门店商圈 CSV")
+    import_trade_area.add_argument("path", type=Path)
+
+    import_competitor_store = sub.add_parser("import-competitor-store", parents=[common],
+                                             help="导入竞品门店 CSV（area_id 必须在本店商圈清单内）")
+    import_competitor_store.add_argument("path", type=Path)
+    import_competitor_offer = sub.add_parser("import-competitor-offer", parents=[common],
+                                             help="导入竞品采样明细 CSV（需带采样人/采集方式/来源说明）")
+    import_competitor_offer.add_argument("path", type=Path)
+
+    sub.add_parser("ops-status", parents=[common], help="查看门店侧数据新鲜度")
+    ops_summary = sub.add_parser("ops-summary", parents=[common], help="查看门店侧数据摘要")
+    ops_summary.add_argument("--days", type=int, default=7)
+
     data_quality = sub.add_parser("data-quality", parents=[common], help="数据质量体检：缺日/跳变/批次/新鲜度")
     data_quality.add_argument("--days", type=int, default=30, help="体检窗口天数，默认 30")
     data_quality.add_argument("--fresh-days", type=int, default=2, help="超过多少天视为不新鲜，默认 2")
@@ -88,11 +123,29 @@ def main() -> None:
     store_id = str(config.get("store_id") or "")
 
     store = PlatformMetricStore(args.db, tenant_id=tenant_id)
+    ops = StoreOpsDataStore(args.store_db, tenant_id=tenant_id)
+    competitor = CompetitorStore(args.store_db, tenant_id=tenant_id, ops_store=ops)
     failed = 0
     try:
         if args.command == "import-dir":
-            payload = store.import_directory(args.inbox, store_id)
+            payload = import_inbox(args.inbox, store_id, store, ops, competitor)
             failed = int(payload["failed_count"])
+        elif args.command == "import-traffic":
+            payload = asdict(ops.import_traffic_csv(args.path, store_id))
+        elif args.command == "import-timeslot":
+            payload = asdict(ops.import_timeslot_csv(args.path, store_id))
+        elif args.command == "import-inventory":
+            payload = asdict(ops.import_inventory_csv(args.path, store_id))
+        elif args.command == "import-trade-area":
+            payload = asdict(ops.import_trade_area_csv(args.path, store_id))
+        elif args.command == "import-competitor-store":
+            payload = asdict(competitor.import_competitor_store_csv(args.path, store_id))
+        elif args.command == "import-competitor-offer":
+            payload = asdict(competitor.import_competitor_offer_csv(args.path, store_id))
+        elif args.command == "ops-status":
+            payload = ops.status(store_id)
+        elif args.command == "ops-summary":
+            payload = asdict(ops.summary(store_id, args.days))
         elif args.command == "import-csv":
             payload = asdict(store.import_csv(args.path, store_id))
         elif args.command == "import-packages":

@@ -101,6 +101,8 @@ class TaskStore:
                   reason text not null,
                   evidence_required_json text not null,
                   approval_required integer not null default 0,
+                  rule_key text not null default '',
+                  rule_version text not null default '',
                   due_at text not null,
                   created_at text not null,
                   updated_at text not null,
@@ -174,6 +176,8 @@ class TaskStore:
                     "reason": task["reason"],
                     "evidence_required_json": json.dumps(task.get("evidence_required") or [], ensure_ascii=False),
                     "approval_required": bool(task.get("requires_approval")),
+                    "rule_key": str(task.get("rule_key") or ""),
+                    "rule_version": str(task.get("rule_version") or ""),
                     "due_at": task["due_at"],
                     "updated_at": now,
                 }
@@ -181,7 +185,8 @@ class TaskStore:
                     conn.execute(
                         """update action_tasks set title=:title, assignee_id=:assignee_id, priority=:priority,
                            target_json=:target_json, reason=:reason, evidence_required_json=:evidence_required_json,
-                           approval_required=:approval_required, due_at=:due_at, updated_at=:updated_at
+                           approval_required=:approval_required, rule_key=:rule_key,
+                           rule_version=:rule_version, due_at=:due_at, updated_at=:updated_at
                            where store_id=:store_id and source_fingerprint=:source_fingerprint""",
                         params,
                     )
@@ -192,10 +197,11 @@ class TaskStore:
                     conn.execute(
                         """insert into action_tasks
                            (task_id,store_id,source_fingerprint,category,title,assignee_id,priority,status,
-                            target_json,reason,evidence_required_json,approval_required,due_at,created_at,updated_at)
+                            target_json,reason,evidence_required_json,approval_required,rule_key,rule_version,
+                            due_at,created_at,updated_at)
                            values (:task_id,:store_id,:source_fingerprint,:category,:title,:assignee_id,:priority,
                                    :status,:target_json,:reason,:evidence_required_json,:approval_required,
-                                   :due_at,:created_at,:updated_at)""",
+                                   :rule_key,:rule_version,:due_at,:created_at,:updated_at)""",
                         params,
                     )
                     conn.execute(

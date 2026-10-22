@@ -88,6 +88,48 @@ function renderSide(data) {
     : '<li class="empty">未发现异常</li>';
 }
 
+// 门店侧两张卡片默认关闭；开关只保留在本次会话内（按前端契约不得写入 localStorage）
+const CARD_OPEN = { slots: false, stock: false };
+
+function bindCardToggle(checkboxId, wrapId, key) {
+  const box = $(checkboxId);
+  const wrap = $(wrapId);
+  const apply = () => { wrap.hidden = !CARD_OPEN[key]; };
+  box.onchange = () => { CARD_OPEN[key] = box.checked; apply(); };
+  apply();
+}
+
+function renderOps(data) {
+  const slots = data.time_slots || { enabled: false, state: 'disabled', items: [] };
+  const stock = data.inventory_alerts || { enabled: false, state: 'disabled', items: [] };
+  $('showSlots').disabled = !slots.enabled;
+  $('showStock').disabled = !stock.enabled;
+
+  const slotHint = slots.state === 'not_connected'
+    ? '后端未接入门店侧数据源。'
+    : '该卡片默认关闭：在 store_config.json 的 ops_cards.time_slots 打开后可用。';
+  $('timeSlots').innerHTML = !slots.enabled
+    ? `<tr><td colspan="5" class="empty">${slotHint}</td></tr>`
+    : (slots.items.length
+      ? slots.items.map(item => `<tr><td>${esc(item.slot)}</td><td>${num(item.day_count)}</td><td>${num(item.covers)}</td><td>${num(item.orders)}</td><td>${item.order_share === null || item.order_share === undefined ? '缺数' : (item.order_share * 100).toFixed(1) + '%'}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="empty">窗口内没有时段数据（先导入时段分布报表）。</td></tr>');
+  $('slotsHint').textContent = slots.turnover_rate === null || slots.turnover_rate === undefined
+    ? '按订单占比'
+    : '翻台率 ' + (slots.turnover_rate * 100).toFixed(1) + '%';
+
+  const stockHint = stock.state === 'not_connected'
+    ? '后端未接入门店侧数据源。'
+    : '该卡片默认关闭：在 store_config.json 的 ops_cards.inventory_alerts 打开后可用。';
+  $('inventoryAlerts').innerHTML = !stock.enabled
+    ? `<tr><td colspan="4" class="empty">${stockHint}</td></tr>`
+    : (stock.items.length
+      ? stock.items.map(item => `<tr><td>${esc(item.name)}</td><td>${num(item.quantity)} ${esc(item.unit)}</td><td>${num(item.safety_stock)} ${esc(item.unit)}</td><td>${esc(item.level === 'critical' ? '严重不足' : '低于安全库存')}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">当前没有未处理的库存预警。</td></tr>');
+  $('stockHint').textContent = stock.latest_stock_date
+    ? '最近盘点 ' + stock.latest_stock_date
+    : '低于安全库存的物料';
+}
+
 async function load() {
   try {
     const data = await api('/api/dashboard?days=' + encodeURIComponent($('days').value));
@@ -96,6 +138,7 @@ async function load() {
     renderFunnel(data);
     renderPackages(data);
     renderSide(data);
+    renderOps(data);
     notice(data.has_data ? '' : '该区间没有已校验的平台数据：请先导出并导入官方报表。', !data.has_data);
   } catch (error) {
     if (error.status !== 401) notice('看板加载失败：' + error.message, true);
@@ -113,6 +156,8 @@ async function report(kind) {
   }
 }
 
+bindCardToggle('showSlots', 'slotsCard', 'slots');
+bindCardToggle('showStock', 'stockCard', 'stock');
 $('days').onchange = load;
 $('weekly').onclick = () => report('weekly');
 $('monthly').onclick = () => report('monthly');
