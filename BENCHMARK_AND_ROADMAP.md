@@ -286,7 +286,7 @@ Docker Compose（开发与小规模）与 Helm（生产 Kubernetes）两套形�
 | Python 用例数 | `README.md` / `PRODUCTION_READINESS.md`：499 | 复跑 **499 passed**（229.9s） | 一致，以 499 为准 |
 | Playwright 用例数 | 30 个（desktop + mobile） | 本次未复跑（不属于只读文档任务范围） | 沿用文档记录，标注"本次未复跑" |
 | RLS 表数 | `PRODUCTION_READINESS.md` 批次 8c 记录：17 张表启用 RLS | `schema.sql` 实测 `ENABLE ROW LEVEL SECURITY` **23 处**，`CREATE TABLE` 共 32 处 | **以 23 为准**；17 是批次 8c 当时的快照，已过期 |
-| 父目录 `门店运营系统-结构与差距分析及调整方案.md` | 初稿判断（部分"未实现"结论已过期） | 其文件头部已自带状态更新声明 | 沿用其声明，以 `PRODUCTION_READINESS.md` + `README.md` 为准 |
+| `门店运营系统-结构与差距分析及调整方案.md`（仓库内） | 初稿判断（部分"未实现"结论已过期） | 其文件头部已自带状态更新声明 | 沿用其声明，以 `PRODUCTION_READINESS.md` + `README.md` 为准 |
 ---
 
 ## 6. 差距矩阵
