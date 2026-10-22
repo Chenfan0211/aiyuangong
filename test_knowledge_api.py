@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """第 6 期：知识库接口（列库 / 导入 / 检索）与对话引用回填。"""
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -102,6 +103,20 @@ class KnowledgeApiTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertIn("citations", body)
         self.assertIsInstance(body["citations"], list)
+
+    def test_stream_done_event_carries_citations(self):
+        self.call("POST", "/api/knowledge/documents", DOC, token=self.tokens["manager01"])
+        headers = {"Authorization": f"Bearer {self.tokens['manager01']}"}
+        with self.client.stream("POST", "/api/chat/stream",
+                                json={"session_id": "s-stream", "message": "库存不足怎么办"},
+                                headers=headers) as response:
+            self.assertEqual(response.status_code, 200)
+            body = "".join(chunk for chunk in response.iter_text())
+        events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+        done = [item for item in events if item.get("type") == "done"]
+        self.assertTrue(done, events)
+        self.assertIn("citations", done[0])
+        self.assertIsInstance(done[0]["citations"], list)
 
 
 if __name__ == "__main__":

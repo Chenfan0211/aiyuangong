@@ -12,15 +12,14 @@ import json
 import zipfile
 from typing import Any, Iterable, Optional
 
-from tool_sandbox import ENTRYPOINTS, MAX_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS, NETWORK_POLICIES
+from tool_sandbox import (DEFAULT_LIMITS, ENTRYPOINTS, MAX_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS,
+                          NETWORK_POLICIES)
 
 MANIFEST_VERSION = 1
 REQUIRED_FIELDS = ("template_key", "name", "entrypoint")
 OPTIONAL_FIELDS = ("description", "network_required", "network_policy", "timeout_seconds", "limits",
                    "permissions", "params")
-DEFAULT_LIMITS = {"max_read_bytes": 1024 * 1024, "max_file_bytes": 10 * 1024 * 1024,
-                  "max_workspace_bytes": 100 * 1024 * 1024, "max_entries": 1000,
-                  "max_result_bytes": 200 * 1024}
+# 资源上限与沙箱同源（见 tool_sandbox.DEFAULT_LIMITS）
 SECRET_FIELDS = ("secret", "credentials", "api_key", "token", "password")
 
 

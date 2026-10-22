@@ -230,7 +230,8 @@ class ToolRegistry:
 
     def invoke(self, instance_id: str, payload: Optional[dict[str, Any]] = None, *,
                actor: str = "", timeout: Optional[float] = None,
-               store_id: Optional[str] = None) -> dict[str, Any]:
+               store_id: Optional[str] = None,
+               files: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         instance = self.get_instance(instance_id)
         template = self.get_template(instance["template_id"])
         if store_id and instance["store_id"] != store_id:
@@ -247,7 +248,7 @@ class ToolRegistry:
         try:
             result = run_sandbox(template["entrypoint"], payload, timeout=seconds, network=policy,
                                  network_required=template["network_required"],
-                                 limits=template["limits"])
+                                 limits=template["limits"], files=files)
         except SandboxError as exc:
             self._log(instance, actor, status="blocked", error=str(exc), payload=payload)
             raise ToolRegistryError(str(exc)) from exc

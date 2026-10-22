@@ -199,7 +199,7 @@ TABLES: tuple[TableSpec, ...] = (
               ("tenant_id", "document_id"), db="ops"),
     TableSpec("knowledge_chunks", "knowledge_chunks",
               ("chunk_id", "document_id", "base_id", "store_id", "heading_path", "text",
-               "char_count", "order_index"),
+               "embedding_json", "char_count", "order_index"),
               ("tenant_id", "chunk_id"), db="ops"),
     TableSpec("knowledge_citations", "knowledge_citations",
               ("citation_id", "store_id", "query", "document_id", "chunk_id", "score", "created_at"),
@@ -1161,6 +1161,16 @@ def load_migrations() -> tuple[Migration, ...]:
                 "create policy p_team_tasks_tenant on team_tasks using (tenant_id = current_setting('app.tenant_id', true)) with check (tenant_id = current_setting('app.tenant_id', true))",
             ),
             requires_tables=("digital_employees", "teams", "team_members", "team_tasks"),
+            checksum_tracked=True,
+        ),
+        Migration(
+            version=16,
+            name="knowledge_chunk_embeddings",
+            statements=(
+                # 第 6 期增强：切片向量（应用层词频向量，零依赖；pgvector 可用时同源落成 vector 列）。
+                "alter table knowledge_chunks add column if not exists embedding_json text not null default '{}'",
+            ),
+            requires_tables=("knowledge_chunks",),
             checksum_tracked=True,
         ),
     )

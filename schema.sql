@@ -915,6 +915,7 @@ create table if not exists knowledge_chunks (
   store_id text not null,
   heading_path text not null default '[]',
   text text not null,
+  embedding_json text not null default '{}',
   char_count integer not null default 0,
   order_index integer not null default 0,
   primary key (tenant_id, chunk_id)

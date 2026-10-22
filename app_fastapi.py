@@ -2020,6 +2020,16 @@ def create_app(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         history = ctx.sessions.history(payload.session_id, context.user_id, limit=10)
         user = context.to_user_dict()
+        # 第 6 期增强：流式对话的 done 事件也回填知识库引用（与 /api/chat 一致；失败不影响回答）
+        citations: list[dict[str, Any]] = []
+        if context.has("knowledge:read"):
+            try:
+                knowledge = ctx.knowledge.search(context.store_id, payload.message, limit=3)
+                citations = knowledge["citations"]
+                if citations:
+                    ctx.knowledge.record_citations(context.store_id, payload.message, citations)
+            except Exception:                          # noqa: BLE001 - 引用是增强项
+                citations = []
 
         def events():
             final_text, final_intent = "", ""
@@ -2029,6 +2039,7 @@ def create_app(
                     if event.get("type") == "done":
                         final_text = str(event.get("text") or "")
                         final_intent = str(event.get("intent") or "")
+                        event["citations"] = citations
                     yield "data: " + json.dumps(event, ensure_ascii=False, default=str) + "\n\n"
             except Exception as exc:                      # noqa: BLE001 - 流里出错也要给前端一个事件
                 yield "data: " + json.dumps({"type": "error", "text": f"对话失败：{exc}"},

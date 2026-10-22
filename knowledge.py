@@ -2,8 +2,10 @@
 """知识库 RAG（第 6 期）：结构感知检索 + 可回查引用。
 
 边界（与总方案第 6 期一致）：
-1. **结构 + 关键词打底**：按 Markdown 标题切章节，章节内切片；检索用标题/章节命中 + 关键词重合度打分。
-   **向量检索为后续增强项**（本环境没有 `pgvector`，默认关闭、不引入外部向量库与 RAGFlow）。
+1. **结构 + 关键词打底，向量作增强**：按 Markdown 标题切章节，章节内切片；检索用标题/章节命中 + 关键词重合度打分，
+   再按 `vector_weight` 混入**应用层词频向量**的余弦相似度（`use_vector` 可独立开关）。
+   这里用零依赖的 TF 向量替代 `pgvector`：环境有 pgvector 时同一份 embedding 可直接落成 vector 列，
+   当前没有该扩展也能获得"向量参与打分"的增强，且不引入外部向量库与 RAGFlow。
 2. **引用可回查**：每个引用都带 `base_id / document_id / chunk_id / heading_path`，可回到原文。
 3. **无命中就明说**：返回 `has_match=False` 与 `"知识库没有相关内容"`，不编造、不硬凑引用。
 4. 三条引用治理规则：**重编号**（按命中顺序从 1 编号）、**截断分档**（按长度分级截断）、**剥离页脚**。
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import uuid as uuid_module
 from datetime import datetime
@@ -24,6 +27,7 @@ from auth import redact
 from db import Database
 
 CHUNK_MAX_CHARS = 600
+VECTOR_WEIGHT = 0.3          # 向量分在最终打分里的权重（可被 search 覆盖）
 SNIPPET_LEVELS = ((120, 120), (400, 240), (10 ** 9, 400))
 BASE_STATUSES = ("active", "archived")
 DOC_TYPES = ("text", "markdown")
@@ -89,6 +93,31 @@ def _tokens(text: Any) -> set[str]:
     cjk = re.findall(r"[\u4e00-\u9fff]", raw)
     bigrams = {"".join(pair) for pair in zip(cjk, cjk[1:])}
     return words | set(cjk) | bigrams
+
+
+def token_counts(text: Any) -> dict[str, int]:
+    """词频字典：中文按字符与双字组合，英文/数字按词（零依赖）。"""
+    raw = str(text or "")
+    words = re.findall(r"[0-9A-Za-z]+", raw.lower())
+    cjk = re.findall(r"[\u4e00-\u9fff]", raw)
+    bigrams = ["".join(pair) for pair in zip(cjk, cjk[1:])]
+    counts: dict[str, int] = {}
+    for token in list(words) + cjk + bigrams:
+        counts[token] = counts.get(token, 0) + 1
+    return counts
+
+
+def embed(text: Any) -> dict[str, float]:
+    """词频向量（归一化后的稀疏字典）：可存库、可比较，不依赖 pgvector。"""
+    counts = token_counts(text)
+    norm = math.sqrt(sum(value * value for value in counts.values())) or 1.0
+    return {token: value / norm for token, value in counts.items()}
+
+
+def cosine(left: dict[str, float], right: dict[str, float]) -> float:
+    if not left or not right:
+        return 0.0
+    return round(sum(value * right.get(token, 0.0) for token, value in left.items()), 6)
 
 
 def strip_footer(text: str) -> str:
@@ -162,6 +191,7 @@ class KnowledgeStore:
                   store_id text not null,
                   heading_path text not null default '[]',
                   text text not null,
+                  embedding_json text not null default '{}',
                   char_count integer not null default 0,
                   order_index integer not null default 0,
                   primary key (tenant_id, chunk_id)
@@ -298,14 +328,16 @@ class KnowledgeStore:
                     (self.tenant_id, document_id, base_id, store_id, title, str(source_name or ""),
                      doc_type, content_hash, len(body), len(chunks), self._now()))
                 for order, chunk in enumerate(chunks):
+                    vector = json.dumps(embed(f"{' '.join(chunk['heading_path'])} {chunk['text']}"),
+                                        ensure_ascii=False)
                     conn.execute(
                         """insert into knowledge_chunks
                            (tenant_id,chunk_id,document_id,base_id,store_id,heading_path,text,
-                            char_count,order_index)
-                           values (?,?,?,?,?,?,?,?,?)""",
+                            embedding_json,char_count,order_index)
+                           values (?,?,?,?,?,?,?,?,?,?)""",
                         (self.tenant_id, f"kch-{uuid_module.uuid4().hex[:16]}", document_id, base_id,
                          store_id, json.dumps(chunk["heading_path"], ensure_ascii=False),
-                         chunk["text"], len(chunk["text"]), order))
+                         chunk["text"], vector, len(chunk["text"]), order))
                 conn.execute(
                     """update knowledge_ingest_jobs set status='success', chunk_count=?, finished_at=?
                        where tenant_id=? and job_id=?""",
@@ -368,23 +400,54 @@ class KnowledgeStore:
         bonus = 0.2 if query_tokens & heading_tokens else 0.0
         return round(min(1.0, overlap + bonus), 4)
 
+    def chunk_vector(self, chunk: dict[str, Any]) -> dict[str, float]:
+        """取切片向量：入库时已算好就直接用，历史数据现场补算。"""
+        stored = chunk.get("embedding_json")
+        if isinstance(stored, str) and stored.strip() not in ("", "{}"):
+            try:
+                value = json.loads(stored)
+                if isinstance(value, dict) and value:
+                    return value
+            except json.JSONDecodeError:
+                pass
+        heading = chunk.get("heading_path")
+        if isinstance(heading, str):
+            try:
+                heading = json.loads(heading)
+            except json.JSONDecodeError:
+                heading = []
+        return embed(f"{' '.join(heading or [])} {chunk.get('text') or ''}")
+
     def search(self, store_id: str, query: str, *, base_id: Optional[str] = None,
-               limit: int = 5, min_score: float = 0.15) -> dict[str, Any]:
-        """检索：命中就返回可回查引用，没命中就明确说没有内容。"""
+               limit: int = 5, min_score: float = 0.15, use_vector: bool = True,
+               vector_weight: float = VECTOR_WEIGHT) -> dict[str, Any]:
+        """检索：命中就返回可回查引用，没命中就明确说没有内容。
+
+        `use_vector=False` 时退回纯"标题/章节 + 关键词"打分（增强项可独立关闭）。
+        """
         store_id = self._require_text(store_id, "store_id")
         query = self._require_text(query, "query")
         query_tokens = _tokens(query)
+        weight = max(0.0, min(1.0, float(vector_weight)))
+        query_vector = embed(query) if use_vector else {}
         scored = []
         for chunk in self._candidates(store_id, base_id):
-            score = self.score_chunk(query_tokens, chunk)
+            keyword = self.score_chunk(query_tokens, chunk)
+            if use_vector:
+                vector = cosine(query_vector, self.chunk_vector(chunk))
+                score = round((1 - weight) * keyword + weight * vector, 4)
+            else:
+                score = keyword
             if score >= float(min_score):
                 scored.append((score, chunk))
         scored.sort(key=lambda item: (-item[0], item[1]["chunk_id"]))
         if not scored:
             return {"store_id": store_id, "query": query, "has_match": False,
-                    "reason": NO_MATCH_REASON, "count": 0, "citations": []}
+                    "reason": NO_MATCH_REASON, "count": 0, "citations": [],
+                    "vector_enabled": bool(use_vector), "vector_weight": weight if use_vector else 0.0}
         return {"store_id": store_id, "query": query, "has_match": True, "count": len(scored[:limit]),
-                "citations": self.govern_citations(scored[:limit])}
+                "citations": self.govern_citations(scored[:limit]),
+                "vector_enabled": bool(use_vector), "vector_weight": weight if use_vector else 0.0}
 
     # ---------------- 引用治理 ----------------
 

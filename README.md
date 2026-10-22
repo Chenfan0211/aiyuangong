@@ -5,7 +5,7 @@
 - 门店：武汉狮子座店（`store_id = WH-LION-001`）
 - 形态：单店生产化加固版本，支持 FastAPI + PostgreSQL、云主机 HTTPS、管理岗 TOTP、图片证据和 owner 管理后台
 - 技术栈：Python 3.12 + FastAPI + PostgreSQL 16 + Docker Compose + Caddy
-- 当前验证基线：**742 个 Python 用例 + 34 个 Playwright 浏览器用例**；第 3-10 期新增的 140 个用例全部通过（另有 1 个既有门店侧用例因数据日期硬编码在跨日时失败，待单独修复）
+- 当前验证基线：**751 个 Python 用例 + 34 个 Playwright 浏览器用例**全部通过；第 3-10 期新增的 149 个用例全绿（含跨日用例修复与三项收尾增强）
 - 生产化落地状态与未闭环边界见 `PRODUCTION_READINESS.md`
 
 ---
@@ -14,11 +14,12 @@
 
 | 项 | 要求 |
 |---|---|
+| 2026-10-22 | 收尾增强与全量转绿：①知识库**向量检索**落地为应用层词频向量（零依赖、可开关、切片向量入库，`knowledge_chunks.embedding_json`，`Migration v16`）；②**SSE 流式对话**的 `done` 事件回填 `citations`（与 `/api/chat` 一致）；③**沙箱文件类资源上限**真实生效（受限工作区 + 单次读取 1 MiB / 单文件 10 MiB / 工作区 100 MiB / 条目 1000，新增 `read_file`/`list_files` 受控入口）；④修复 `test_store_ops_data` 的跨日脆弱用例（日期相对化）。全量 **751 个 Python 用例全绿**、`gate-check` 四项通过。 |
 | 2026-10-22 | 第 10 期（多员工/团队与渠道扩展，原 P5）：`digital_employee.py`（岗位档案 + 能力引用，能力 id 必须存在于第 5 期注册表）、`team.py`（团队：数字员工领导 + `human_fallback` 人工兜底；成员支持数字员工与真人；团队任务 **指派 + 认领**，状态机 offered → claimed → completed，非法转换拒绝；**不做竞标与血条赛制**）；四张表进权威模型（`Migration v15`）与保留策略（档案永久、团队任务 730 天）；五条接口 + `workforce:read/manage` 权限（路由 86 → 91）。**入站统一收口复用既有的 `/api/inbound/messages/{provider}`**，不新建第二套通道。新增 11 个用例。 |
 | 2026-10-22 | 第 9 期（记忆 + 反馈进化，原 P4）：`memory.py`（三类记忆的规则式抽取、按内容哈希去重并累加 hits、按租户/门店/用户隔离召回）；`skill_evolution.py`（偏好达到证据阈值时蒸馏为 `sop_step` 提案、反思提案、人工确认）；两张表进权威模型（`Migration v14`）与保留策略（各 730 天）；四条接口 + `memory:read/write`、`evolution:read/decide` 权限（路由 82 → 86）。**不做规则侧改动**（规则调参已在第 3 期完成）；提案只记录，未人工确认时系统行为完全不变。新增 13 个用例。 |
-| 2026-10-22 | 第 8 期（工具模板/实例 + 沙箱，原 P3）：`tool_manifest.py`（manifest 校验与 ZIP 导入导出，**导出 secret 一律清空**）、`tool_registry.py`（模板/实例/凭据三表；凭据只存 sha256 哈希与掩码；网络策略、跨店与超时三类拒绝都写 `agent_tool_runs` 留痕）、`tool_sandbox.py`（受控入口白名单 + 独立子进程 + 1-3600 秒超时 + 结果 200 KiB 上限；崩溃/超时不影响主进程）；三张表进权威模型（`Migration v13`）与保留策略（永久）；五条接口 + `tool:read/manage/invoke` 权限（路由 77 → 82）。**安全决策**：沙箱是 README 14.4 第 6 条的唯一显式豁免处（行内 `# noqa: dangerous` + 理由），且不支持任意用户脚本，只执行白名单入口。新增 13 个用例。 |
+| 2026-10-22 | 第 8 期（工具模板/实例 + 沙箱，原 P3）：`tool_manifest.py`（manifest 校验与 ZIP 导入导出，**导出 secret 一律清空**）、`tool_registry.py`（模板/实例/凭据三表；凭据只存 sha256 哈希与掩码；网络策略、跨店与超时三类拒绝都写 `agent_tool_runs` 留痕）、`tool_sandbox.py`（受控入口白名单 + 独立子进程 + 1-3600 秒超时 + 结果 200 KiB 上限；崩溃/超时不影响主进程）；三张表进权威模型（`Migration v13`）与保留策略（永久）；五条接口 + `tool:read/manage/invoke` 权限（路由 77 → 82）。**安全决策**：沙箱是 README 14.4 第 6 条的唯一显式豁免处（行内 `# noqa: dangerous` + 理由），且不支持任意用户脚本，只执行白名单入口。**收尾已补做**：受限工作区 + 四项文件上限（单次读取 1 MiB / 单文件 10 MiB / 工作区 100 MiB / 条目 1000）真实生效（`read_file`/`list_files` 入口）。新增 13 个用例。 |
 | 2026-10-22 | 第 7 期（SOP 状态机 + 技能图，原 P2）：`sop.py`（4 类节点 agent/human/approval/condition、图校验：唯一入口/节点类型/边引用/分支 default 出口；版本与单一生效版本）、`sop_runtime.py`（8 态状态机 + 非法转换拒绝 + 断点快照 + `submit_human`/`resume` + SOP 级 `max_hours` 与步骤级超时出口）；四张表进权威模型（`Migration v12`）与保留策略（定义/版本永久、运行与步骤 730 天）；五条接口 + `sop:read/manage/run` 权限（路由 72 → 77）；审批节点复用既有 `/api/approvals`。**边界固化**：task 状态变更不直接改写 sop_run（必须经 `submit_human`）。新增 14 个用例。 |
-| 2026-10-22 | 第 6 期（知识库 RAG，原 P1）：`knowledge.py`（Markdown 章节切分 + 章节内切片 + 标题/关键词结构感知打分 + 三条引用治理规则：重编号、截断分档、剥离页脚；引用带 `document_id`/`chunk_id`/`heading_path` 可回查）；**无命中明确返回「知识库没有相关内容」**；导入按 sha256 幂等；五张表进权威模型（`Migration v11`）与保留策略（知识库/文档/chunk 永久、引用与入库任务 180 天）；`/api/knowledge/bases`、`/api/knowledge/documents`、`/api/knowledge/search` 三条接口与 `knowledge:read/manage` 权限（路由 69 → 72）；`search_knowledge` 工具（工具总数 15 → 16）与 `/api/chat` 的 `citations`。**未做**：向量检索（本环境无 `pgvector`，按计划作为后续增强项，默认关闭）；SSE 流式对话未回填引用。新增 12 个用例。 |
+| 2026-10-22 | 第 6 期（知识库 RAG，原 P1）：`knowledge.py`（Markdown 章节切分 + 章节内切片 + 标题/关键词结构感知打分 + 三条引用治理规则：重编号、截断分档、剥离页脚；引用带 `document_id`/`chunk_id`/`heading_path` 可回查）；**无命中明确返回「知识库没有相关内容」**；导入按 sha256 幂等；五张表进权威模型（`Migration v11`）与保留策略（知识库/文档/chunk 永久、引用与入库任务 180 天）；`/api/knowledge/bases`、`/api/knowledge/documents`、`/api/knowledge/search` 三条接口与 `knowledge:read/manage` 权限（路由 69 → 72）；`search_knowledge` 工具（工具总数 15 → 16）与 `/api/chat` 的 `citations`。**收尾已补做**：应用层词频向量（零依赖，`use_vector`/`vector_weight` 可独立开关，切片向量随文档入库）；SSE 流式对话的 `done` 事件回填 `citations`。pgvector 原生路径仍不做（环境无该扩展）。新增 12 个用例。 |
 | 2026-10-22 | 第 5 期（能力注册与作用域底座，原 P0）：`capability_scope.py`（作用域值对象 + required ⊆ allowed 校验）、`capabilities.py`（15 个工具注册为 `tool:<name>` 能力；`available_for()` 按身份过滤；受控调用越权即拒并写 `agent_tool_runs` 的 `blocked` 留痕）；`capabilities`/`capability_bindings` 两表进权威模型（`Migration v10`）与保留策略（主数据永久）；`GET /api/capabilities`（路由 68 → 69）。**实施偏差**：为让「tools 数组与改造前逐字一致」可证伪，ToolSpec 仍是声明真相源、注册表从它派生（有用例逐字比对），参数适配仍由 `llm_agent._invoke` 承担。新增 11 个用例。 |
 | 2026-10-22 | 第 4 期（巡店独立流程 + 申诉闭环）：`inspection.py` + `inspection_templates`/`inspection_items`（固定字段模板、版本与单一生效版本、巡店任务 `category=inspection`、缺项复核）；`appeal.py` + `appeals`（一任务一次有效申诉、驳回必须写结论）；`GET/POST /api/inspection-templates`、`POST /api/inspections`、`GET /api/inspections/{task_id}`、`POST /api/appeals`、`POST /api/appeals/{appeal_id}/decide` 六条接口与 `inspection:*`/`appeals:*` 五个权限（路由 62 → 68）；**未结案申诉阻断奖惩审批**（409）；看板任务按 `category` 计数以区分巡店；三张表进权威模型（`Migration v9`）与保留策略（模板永久、申诉 730 天）。新增 14 个用例。 |
 | 2026-10-22 | 第 3 期第 1-6 步（规则外置与版本化 + 归因回灌）：`action_rules` 转正 + `rule_store.py`（版本/状态机/单一 approved 约束）；`rule_seed.py` 导出 7 条内置规则并支持 `rules-seed --approve` 生效；`rule_eval.py` 表驱动执行器 + 与内置引擎逐字段一致性回归（含真实 `build_snapshot` 快照）；`GET/POST /api/rules`、`/versions`、`/decide` 四个接口与 `rules:read/write/decide` 权限；`generate_daily_plan(rules=...)` 注入，规则未就绪时回退内置并写 `plan_rule_fallback` 审计；第 5 步：`analysis.RULE_VERSION`/`DIAGNOSIS_RULE_VERSION` 改为读表版本 + 代码兜底，`task_feedback`/`task_outcomes` 收口进 `schema.sql` 与 `pg_sync`（`Migration v6`）；第 6 步：任务带 `rule_key`/`rule_version`（`Migration v7`）以支持追溯，新增 `rule_outcomes.py` 与 `rule_outcomes` 表（`Migration v8`）把任务结果按规则版本聚合成**调参提案**（从不回写 `action_rules`），`GET /api/rules/{rule_key}/outcomes` 与 `store_cli.py rules-outcomes`；三张归因表纳入保留策略（730 天）。新增 52 个用例。 |
@@ -79,7 +80,7 @@ python -m unittest discover -p "test_*.py"     # Windows
 python3 -m unittest discover -p "test_*.py"    # macOS / Linux
 ```
 
-当前基线：**742 个 Python 用例 + 34 个 Playwright 浏览器用例**（含 FastAPI 完整接口契约、PostgreSQL 迁移/等价性/RLS、标准库核心备用入口、推送与大模型工具调用均用本地桩实测 HTTP）。
+当前基线：**751 个 Python 用例 + 34 个 Playwright 浏览器用例**（含 FastAPI 完整接口契约、PostgreSQL 迁移/等价性/RLS、标准库核心备用入口、推送与大模型工具调用均用本地桩实测 HTTP）。
 
 ---
 

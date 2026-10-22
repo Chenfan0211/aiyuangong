@@ -2,11 +2,12 @@
 
 - 日期：2026-10-22
 - 分支：`dev/dev-20261020`
-- Python：`python -m unittest discover -p "test_*.py"` → **741 passed / 1 failed**（第 3-10 期新增 140 个全绿；失败项是 `test_store_ops_data` 的既有跨日日期脆弱用例）
+- Python：`python -m unittest discover -p "test_*.py"` → **751 passed**（第 3-10 期新增 149 个全绿；跨日脆弱用例已修复）
 - 浏览器：`PLAYWRIGHT_CHANNEL=chrome npm run test:e2e` → **34 passed**（desktop + mobile）
 
 ## 已完成
 
+- 收尾增强：知识库应用层词频向量（零依赖、可开关，`Migration v16`）；SSE `done` 事件回填 `citations`；沙箱受限工作区与四项文件上限（`read_file`/`list_files`）；`test_store_ops_data` 跨日用例相对日期化。全量 751 用例全绿、gate-check 四项通过。
 - 第 10 期多员工/团队与渠道扩展：`digital_employee.py`（岗位 + 能力引用，校验第 5 期注册表）+ `team.py`（数字员工领导 + 人工兜底；成员两类；团队任务指派 + 认领，非法转换拒绝，不做竞标）；四张表进权威模型（`Migration v15`）与保留策略；五条接口 + `workforce:read/manage`；入站收口复用既有 `/api/inbound/messages/{provider}`。
 - 第 9 期记忆 + 反馈进化：`memory.py`（三类记忆抽取/去重/隔离召回）+ `skill_evolution.py`（蒸馏与反思提案 + 人工确认）；两张表进权威模型（`Migration v14`）与保留策略；四条接口 + `memory:read/write`、`evolution:read/decide`。不做规则侧改动；提案只记录，未确认时行为不变。
 - 第 8 期工具模板/实例 + 沙箱：`tool_manifest.py`（导出清空 secret）+ `tool_registry.py`（凭据只存哈希；网络/跨店/超时拒绝留痕）+ `tool_sandbox.py`（受控入口白名单 + 独立子进程 + 超时 + 结果上限；崩溃不影响主进程）；三张表进权威模型（`Migration v13`）与保留策略；五条接口 + `tool:read/manage/invoke`。沙箱是 14.4 红线第 6 条的唯一显式豁免处。

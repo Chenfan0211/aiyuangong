@@ -94,6 +94,39 @@ class KnowledgeTests(unittest.TestCase):
         with self.assertRaises(KnowledgeError):
             self.store.ingest_document(STORE, "kb-none", "文档", CONTENT)
 
+    def test_chunk_embeddings_are_persisted(self):
+        document = self.store.ingest_document(STORE, self.base["base_id"], "运营手册", CONTENT)
+        rows = self.store._candidates(STORE, self.base["base_id"])
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertNotEqual(row["embedding_json"], "{}")
+        self.assertGreater(document["chunk_count"], 0)
+
+    def test_vector_scoring_can_be_toggled(self):
+        self.store.ingest_document(STORE, self.base["base_id"], "运营手册", CONTENT)
+        with_vector = self.store.search(STORE, "库存安全库存", use_vector=True)
+        without_vector = self.store.search(STORE, "库存安全库存", use_vector=False)
+        self.assertTrue(with_vector["has_match"])
+        self.assertTrue(without_vector["has_match"])
+        self.assertTrue(with_vector["vector_enabled"])
+        self.assertEqual(with_vector["vector_weight"], 0.3)
+        self.assertFalse(without_vector["vector_enabled"])
+        self.assertEqual(without_vector["vector_weight"], 0.0)
+        # 同一查询：向量参与后最终得分发生变化（说明确实参与打分）
+        self.assertNotEqual(with_vector["citations"][0]["score"],
+                            without_vector["citations"][0]["score"])
+
+    def test_vector_weight_can_be_disabled_by_zero_weight(self):
+        self.store.ingest_document(STORE, self.base["base_id"], "运营手册", CONTENT)
+        zero = self.store.search(STORE, "库存安全库存", use_vector=True, vector_weight=0.0)
+        plain = self.store.search(STORE, "库存安全库存", use_vector=False)
+        self.assertEqual(zero["citations"][0]["score"], plain["citations"][0]["score"])
+
+    def test_no_match_reports_vector_flag(self):
+        result = self.store.search(STORE, "如何烘焙咖啡豆")
+        self.assertFalse(result["has_match"])
+        self.assertIn("vector_enabled", result)
+
 
 if __name__ == "__main__":
     unittest.main()

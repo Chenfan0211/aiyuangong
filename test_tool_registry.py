@@ -133,6 +133,44 @@ class ToolRegistryTests(unittest.TestCase):
         with self.assertRaises(ManifestError):
             import_template_zip(buffer.getvalue())
 
+    # ---------------- 工作区文件上限（第 8 期补做） ----------------
+
+    def test_workspace_limits_are_enforced(self):
+        with self.assertRaises(SandboxError):
+            run_sandbox("list_files", {}, limits={"max_entries": 2},
+                        files={f"f{i}.txt": b"x" for i in range(3)})
+        with self.assertRaises(SandboxError):
+            run_sandbox("read_file", {"name": "big.txt"}, limits={"max_file_bytes": 4},
+                        files={"big.txt": b"12345"})
+        with self.assertRaises(SandboxError):
+            run_sandbox("list_files", {}, limits={"max_workspace_bytes": 4},
+                        files={"a.txt": b"123", "b.txt": b"456"})
+
+    def test_read_file_works_and_respects_single_read_cap(self):
+        payload = "库存不足".encode("utf-8")
+        result = run_sandbox("read_file", {"name": "note.txt"}, files={"note.txt": payload})
+        self.assertEqual(result["result"]["size"], len(payload))
+        self.assertTrue(result["result"]["sha256"])
+        self.assertIn("库存不足", result["result"]["preview"])
+        listing = run_sandbox("list_files", {}, files={"a.txt": b"1", "b.txt": b"2"})
+        self.assertEqual(listing["result"]["files"], ["a.txt", "b.txt"])
+        with self.assertRaises(SandboxError):
+            run_sandbox("read_file", {"name": "mid.txt"}, limits={"max_read_bytes": 1000},
+                        files={"mid.txt": b"x" * 2000})
+
+    def test_read_file_rejects_path_escape(self):
+        with self.assertRaises(SandboxError):
+            run_sandbox("read_file", {"name": "../secret.txt"}, files={"ok.txt": b"1"})
+
+    def test_registry_invoke_passes_workspace_files(self):
+        manifest = {**MANIFEST, "template_key": "reader", "entrypoint": "read_file"}
+        template = self.registry.register_template(STORE, manifest)
+        instance = self.registry.create_instance(STORE, template["template_id"], "reader-a")
+        result = self.registry.invoke(instance["instance_id"], {"name": "data.txt"},
+                                      files={"data.txt": b"hello"}, store_id=STORE)
+        self.assertEqual(result["result"]["size"], 5)
+        self.assertEqual(result["workspace_entries"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
